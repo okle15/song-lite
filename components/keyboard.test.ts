@@ -29,8 +29,7 @@ test('SHORTCUTS：每行至少一个非空键帽文本', () => {
 
 test('SHORTCUTS：覆盖全部已实现的快捷键（漏行 = 用户以为没这个功能）', () => {
 	const shown = new Set(SHORTCUTS.flatMap((s) => s.keys));
-	// 'K'（唤起 AI 对话）已随对话链路一并移除，别再往这里加回来。
-	const expected = ['空格', '←', '→', '↑', '↓', 'M', 'N', 'P', 'L', 'F', 'Esc'];
+	const expected = ['空格', '←', '→', '↑', '↓', 'M', 'N', 'P', 'L', 'F', 'K', 'Esc'];
 	const missing = expected.filter((k) => !shown.has(k));
 	assert.deepEqual(missing, [], `展示清单缺少键帽：${missing.join(' / ')}`);
 });

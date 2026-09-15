@@ -1,5 +1,5 @@
 /**
- * 工具结果的 wire 形状 —— 服务端 `agent/tools.ts` 产出、浏览器 `AgentMount` 消费。
+ * 工具结果的 wire 形状 —— 服务端 `agent/tools.ts` 产出、浏览器 `ChatCard` 消费。
  *
  * 为什么单独成文件（而不是定义在 `agent/tools.ts` 里）：这个形状有**两个**消费者，
  * 一个在服务端、一个在浏览器。定义在生产方的话，浏览器侧就得 `import type` 一条

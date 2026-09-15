@@ -1,34 +1,28 @@
 /**
- * AgentMount —— 最小对话面板（右下浮层）。
+ * ChatCard — 「音乐助手」卡片的内容。
+ *
+ * 它就是布局系统里的一张普通卡片：可拉伸、可与别的卡合并成标签页、可隐藏。
+ * 前一版是右下角的 fixed 浮窗（`AgentMount`），两个问题：
+ *   1. 浮层压住「播放队列」面板的底部把手与 ⋯ 菜单，右下角没法拖；
+ *   2. 它游离在 `panel-layout` 之外，不参与合并 / 拆分 / 隐藏 / 持久化。
  *
  * 传输（BLUEPRINT §2 的 ⑧ 冻结区）交给 AI SDK 的 `useChat`：读 SSE、增量拼装、
- * 消息状态、中断、错误，**全部不写**。本文件因此只剩两件事——把播放状态带上、
- * 把 parts 画出来。
+ * 消息状态、中断、错误全部不写。本文件只剩两件事——把 parts 画出来、把输入框做出来。
  *
- * 为什么是浮层而不是布局系统里的一张卡片：`components/panel-layout.ts`、
- * `LayoutProvider`、`LayoutMenu` 都是已冻结的面板基建，往那里加卡片要改四个文件；
- * 浮层只需 `app/page.tsx` 里一行 `<AgentMount />`。等对话形态定下来之后再考虑搬进去。
- *
- * 与播放器的关系：本组件**只读**播放状态（`usePlayerSnapshot`），把它随消息一起发给
- * 服务端，让 agent 知道「现在在放什么」。控制播放则是 agent 在服务端调
- * `/api/player/*`，前端通过既有的 SSE 广播自动跟上——本组件不参与，也不需要参与。
- *
- * 图标内联在文件里（而非 `components/icons/index.tsx`）：这样整个对话功能是自包含的，
- * 删掉它就等于删掉全部改动。定稿后再把图标挪进图标库。
+ * 状态归属（重要）：`useChat` 在 `app/page.tsx` 的 `MainPanels` 里调用，**不在本组件内**。
+ * 因为切换标签页会卸载本组件，状态放在这里会连整段对话一起丢。所以这里只接 props。
  */
 'use client';
-import { useChat } from '@ai-sdk/react';
 import {
-	DefaultChatTransport,
 	getToolName,
 	isStaticToolUIPart,
 	isTextUIPart,
+	type ChatStatus,
 	type ToolUIPart,
+	type UIMessage,
 } from 'ai';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { ToolOutcome } from '@/contract/tool';
-import { usePlayerSnapshot } from './PlayerProvider';
-import { useEscapeToClose } from './use-escape-to-close';
 
 /** 工具名的中文标签；未登记的走原始名。 */
 const TOOL_LABEL: Record<string, string> = {
@@ -76,7 +70,7 @@ function friendlyError(err: Error): string {
 	return err.message;
 }
 
-function SparkIcon({ size = 20 }: { size?: number }) {
+function SendIcon({ size = 16 }: { size?: number }) {
 	return (
 		<svg
 			width={size}
@@ -84,26 +78,7 @@ function SparkIcon({ size = 20 }: { size?: number }) {
 			viewBox="0 0 24 24"
 			fill="none"
 			stroke="currentColor"
-			strokeWidth={2}
-			strokeLinecap="round"
-			strokeLinejoin="round"
-			aria-hidden
-		>
-			<path d="M12 3.5 13.9 9l5.6 1.9-5.6 1.9L12 18.4l-1.9-5.6L4.5 10.9 10.1 9z" />
-			<path d="M18.6 3.2v3M17.1 4.7h3" />
-		</svg>
-	);
-}
-
-function SendIcon({ size = 18 }: { size?: number }) {
-	return (
-		<svg
-			width={size}
-			height={size}
-			viewBox="0 0 24 24"
-			fill="none"
-			stroke="currentColor"
-			strokeWidth={2}
+			strokeWidth={2.2}
 			strokeLinecap="round"
 			strokeLinejoin="round"
 			aria-hidden
@@ -115,7 +90,7 @@ function SendIcon({ size = 18 }: { size?: number }) {
 }
 
 /** 停止按钮：一个实心方块。 */
-function StopIcon({ size = 16 }: { size?: number }) {
+function StopIcon({ size = 14 }: { size?: number }) {
 	return (
 		<svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
 			<rect x="6.5" y="6.5" width="11" height="11" rx="2.5" />
@@ -123,27 +98,21 @@ function StopIcon({ size = 16 }: { size?: number }) {
 	);
 }
 
-export function AgentMount() {
-	const snapshot = usePlayerSnapshot();
-	const [open, setOpen] = useState(false);
-	const [input, setInput] = useState('');
+type Props = {
+	messages: UIMessage[];
+	status: ChatStatus;
+	error?: Error;
+	onSend: (text: string) => void;
+	onStop: () => void;
+};
 
-	// 传输只建一次：它内部是没有可变状态的配置对象，重建等于把在途的流丢掉。
-	const transport = useMemo(() => new DefaultChatTransport({ api: '/api/agent' }), []);
-	const { messages, sendMessage, status, error, clearError, stop } = useChat({ transport });
+export function ChatCard({ messages, status, error, onSend, onStop }: Props) {
+	const [input, setInput] = useState('');
+	const listRef = useRef<HTMLDivElement>(null);
+	const taRef = useRef<HTMLTextAreaElement>(null);
 
 	/** `submitted` = 已发出、还没等到首字；`streaming` = 正在吐字。两者都算忙。 */
 	const busy = status === 'submitted' || status === 'streaming';
-
-	const listRef = useRef<HTMLDivElement>(null);
-	const inputRef = useRef<HTMLInputElement>(null);
-
-	useEscapeToClose(() => setOpen(false), open);
-
-	// 打开时聚焦输入框
-	useEffect(() => {
-		if (open) inputRef.current?.focus();
-	}, [open]);
 
 	// 流式追加内容后把列表滚到底
 	useEffect(() => {
@@ -151,59 +120,41 @@ export function AgentMount() {
 		if (el) el.scrollTop = el.scrollHeight;
 	}, [messages]);
 
+	// 输入框随内容自动增高（上限由 max-h 控制）
+	useEffect(() => {
+		const el = taRef.current;
+		if (!el) return;
+		el.style.height = 'auto';
+		el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+	}, [input]);
+
 	const send = () => {
 		const text = input.trim();
 		if (!text || busy) return;
 		setInput('');
-		clearError();
-		// 快照随消息带上——服务端据此知道「现在在放什么」，省掉一次读状态往返。
-		void sendMessage({ text }, { body: { snapshot } });
+		onSend(text);
 	};
-
-	if (!open) {
-		return (
-			<button
-				type="button"
-				onClick={() => setOpen(true)}
-				aria-label="打开音乐助手对话"
-				className="glass lift fixed bottom-20 right-3 z-40 flex h-11 w-11 items-center justify-center rounded-full border border-border text-brand shadow-lg transition hover:border-brand/40 sm:bottom-24 sm:right-5"
-			>
-				<SparkIcon />
-			</button>
-		);
-	}
 
 	const errText = error ? friendlyError(error) : null;
 
 	return (
-		<section
-			aria-label="音乐助手对话"
-			className="glass fixed bottom-20 right-3 z-40 flex h-[min(70vh,520px)] w-[min(94vw,380px)] flex-col overflow-hidden rounded-2xl border border-border shadow-2xl sm:bottom-24 sm:right-5"
-		>
-			<header className="flex shrink-0 items-center justify-between border-b border-border px-3 py-2">
-				<div className="flex items-center gap-2 text-brand">
-					<SparkIcon size={16} />
-					<h2 className="text-sm font-semibold text-foreground">音乐助手</h2>
-				</div>
-				<button
-					type="button"
-					onClick={() => setOpen(false)}
-					aria-label="关闭对话"
-					className="rounded-lg px-2 py-1 text-xs text-muted transition hover:bg-surface-2 hover:text-foreground"
-				>
-					关闭
-				</button>
-			</header>
-
-			<div ref={listRef} className="scroll-area flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-3">
+		<div className="flex min-h-0 flex-1 flex-col">
+			<div
+				ref={listRef}
+				className="scroll-area flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto px-3 py-3"
+			>
 				{messages.length === 0 && (
-					<p className="mt-6 text-center text-xs leading-relaxed text-muted">
-						试试「放一首传奇」
-						<br />
-						「现在在放什么」
-						<br />
-						「换下一首」
-					</p>
+					<div className="mx-auto mt-4 max-w-[16rem] text-center">
+						<span className="mx-auto mb-2.5 flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-brand to-brand-2 text-lg shadow-sm">
+							🎵
+						</span>
+						<p className="text-sm font-semibold">你好，我是你的音乐助手</p>
+						<ul className="mt-2 space-y-1 text-xs leading-relaxed text-muted">
+							<li>「放一首传奇」</li>
+							<li>「现在在放什么」</li>
+							<li>「换下一首」</li>
+						</ul>
+					</div>
 				)}
 
 				{messages.map((m) => (
@@ -218,8 +169,8 @@ export function AgentMount() {
 										key={`t${i}`}
 										className={
 											m.role === 'user'
-												? 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-brand-soft px-3 py-1.5 text-xs leading-relaxed'
-												: 'max-w-[92%] whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground'
+												? 'max-w-[85%] whitespace-pre-wrap break-words rounded-2xl rounded-br-sm bg-brand-soft px-3 py-1.5 text-sm leading-relaxed'
+												: 'max-w-[92%] whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground'
 										}
 									>
 										{part.text}
@@ -243,7 +194,9 @@ export function AgentMount() {
 										<span className="font-medium text-foreground">
 											{TOOL_LABEL[trace.name] ?? trace.name}
 										</span>
-										{trace.ms !== undefined && <span className="ml-1.5 opacity-70">{trace.ms}ms</span>}
+										{trace.ms !== undefined && (
+											<span className="ml-1.5 opacity-70">{trace.ms}ms</span>
+										)}
 										{trace.text ? (
 											<p className="mt-0.5 break-words opacity-90" title={trace.text}>
 												{trace.text.length > 120 ? `${trace.text.slice(0, 120)}…` : trace.text}
@@ -271,9 +224,15 @@ export function AgentMount() {
 				{busy && <span className="text-[11px] text-muted">正在思考…</span>}
 			</div>
 
-			<div className="flex shrink-0 items-center gap-2 border-t border-border p-2">
-				<input
-					ref={inputRef}
+			<form
+				onSubmit={(e) => {
+					e.preventDefault();
+					send();
+				}}
+				className="flex shrink-0 items-end gap-2 border-t border-border p-2"
+			>
+				<textarea
+					ref={taRef}
 					value={input}
 					onChange={(e) => setInput(e.target.value)}
 					onKeyDown={(e) => {
@@ -282,30 +241,31 @@ export function AgentMount() {
 							send();
 						}
 					}}
+					rows={1}
+					aria-label="输入消息"
 					placeholder={busy ? '回复中…' : '说点什么，比如「放一首传奇」'}
-					className="min-w-0 flex-1 rounded-xl border border-border bg-surface-2 px-3 py-1.5 text-xs text-foreground outline-none transition placeholder:text-muted focus:border-brand/50 disabled:opacity-60"
+					className="max-h-24 min-h-[2.25rem] min-w-0 flex-1 resize-none rounded-xl border border-border bg-surface-2 px-3 py-1.5 text-sm text-foreground outline-none transition placeholder:text-muted focus:border-brand/50"
 				/>
 				{busy ? (
 					<button
 						type="button"
-						onClick={() => stop()}
+						onClick={onStop}
 						aria-label="停止生成"
-						className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-foreground transition hover:bg-border"
+						className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-surface-2 text-foreground transition hover:bg-border"
 					>
 						<StopIcon />
 					</button>
 				) : (
 					<button
-						type="button"
-						onClick={send}
+						type="submit"
 						disabled={!input.trim()}
 						aria-label="发送"
-						className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-brand text-white transition hover:bg-brand-strong disabled:cursor-not-allowed disabled:opacity-40"
+						className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-brand text-white shadow-sm transition hover:bg-brand-strong active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
 					>
 						<SendIcon />
 					</button>
 				)}
-			</div>
-		</section>
+			</form>
+		</div>
 	);
 }

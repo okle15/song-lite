@@ -223,6 +223,15 @@ export function CloseIcon({ size = 16, ...rest }: IconProps) {
 }
 
 /** 勾选 ✓（卡片启用 / 多选确认）。 */
+/** 音乐助手对话入口（气泡）。 */
+export function ChatIcon({ size = 16, ...rest }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
 export function CheckIcon({ size = 16, ...rest }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>

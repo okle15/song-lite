@@ -1,7 +1,7 @@
 /**
  * 可配置面板布局：类型 / 默认值 / 持久化 / 变更操作。
  *
- * 需求：歌词、正在播放、播放队列 3 张卡片要能
+ * 需求：音乐助手、歌词、正在播放、播放队列 4 张卡片要能
  *   1) 自由拉伸（Pane 之间的分隔条调高度，两列之间调宽度）
  *   2) 合并成标签页（一个 Pane 内放多张卡片，Tab 切换）
  *   3) 隐藏 / 恢复
@@ -11,15 +11,16 @@
  * 尺寸一律用相对 flex 值（不存像素），这样窗口缩放、跨设备读取都不会错位。
  */
 
-export type CardId = 'lyrics' | 'nowplaying' | 'queue';
+export type CardId = 'chat' | 'lyrics' | 'nowplaying' | 'queue';
 
 export const CARD_LABELS: Record<CardId, string> = {
+	chat: '音乐助手',
 	lyrics: '歌词',
 	nowplaying: '正在播放',
 	queue: '播放队列',
 };
 
-export const ALL_CARD_IDS: CardId[] = ['lyrics', 'nowplaying', 'queue'];
+export const ALL_CARD_IDS: CardId[] = ['chat', 'lyrics', 'nowplaying', 'queue'];
 
 export type Pane = {
 	id: string;
@@ -50,12 +51,18 @@ export type Layout = {
 const STORAGE_KEY = 'music-panel-layout';
 
 /**
- * 默认布局：左列 = 歌词，右列 = 正在播放 / 播放队列。
+ * 默认布局：左列 = 音乐助手 / 歌词，右列 = 正在播放 / 播放队列。
+ *
+ * 四张卡默认各自独立成一格，**不预先合并成标签页**：这样分隔条、拖拽手柄、
+ * 合并 / 拆分这些能力一进来就都有可操作对象，而不是藏在一层菜单后面。
  */
 export function defaultLayout(): Layout {
 	return {
 		columns: [
-			[{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.5 }],
+			[
+				{ id: 'pane-chat', cards: ['chat'], active: 'chat', flex: 1.1 },
+				{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.5 },
+			],
 			[
 				{ id: 'pane-nowplaying', cards: ['nowplaying'], active: 'nowplaying', flex: 1.25 },
 				{ id: 'pane-queue', cards: ['queue'], active: 'queue', flex: 1.25 },
@@ -408,4 +415,19 @@ export function restoreCard(layout: Layout, card: CardId, col?: ColumnIndex): La
 		columns: draft,
 		hidden: layout.hidden.filter((c) => c !== card),
 	};
+}
+
+/**
+ * 确保某卡片可见并激活（顶栏「音乐助手」按钮 / ⌘K 用）。
+ *
+ * 三件事合一，因为调用方只关心「我要看到这张卡」：
+ * 被隐藏了就恢复，在合并标签组里就切到它，已经可见且是激活卡则原样返回。
+ */
+export function ensureVisible(layout: Layout, card: CardId): Layout {
+	if (layout.hidden.includes(card)) return restoreCard(layout, card);
+	const at = locate(layout, card);
+	if (!at) return layout;
+	const pane = layout.columns[at.col][at.paneIdx];
+	if (pane.active === card) return layout;
+	return setActiveCard(layout, pane.id, card);
 }

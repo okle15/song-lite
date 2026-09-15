@@ -42,7 +42,7 @@ export interface ShortcutSpec {
 	desc: string;
 }
 
-/** 展示用快捷键清单。行为实现在 GlobalHotkeys（含 F），请保持两者语义一致。 */
+/** 展示用快捷键清单。行为实现在 GlobalHotkeys（含 F / ⌘K），请保持两者语义一致。 */
 export const SHORTCUTS: ShortcutSpec[] = [
 	{ keys: ['空格'], desc: '播放 / 暂停' },
 	{ keys: ['←', '→'], desc: '快退 / 快进 5 秒' },
@@ -52,5 +52,6 @@ export const SHORTCUTS: ShortcutSpec[] = [
 	{ keys: ['P'], desc: '上一首' },
 	{ keys: ['L'], desc: '定位到歌词' },
 	{ keys: ['F'], desc: '全屏歌词沉浸' },
+	{ keys: ['⌘', 'K'], desc: '唤起音乐助手（Ctrl+K 同）' },
 	{ keys: ['Esc'], desc: '关闭当前面板' },
 ];

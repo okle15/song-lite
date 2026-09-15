@@ -15,6 +15,7 @@ import { useEscapeToClose } from './use-escape-to-close';
 import { CheckIcon, GridIcon } from './icons';
 
 const CARD_HINTS: Record<CardId, string> = {
+	chat: '用说话的方式放歌、切歌',
 	nowplaying: '大封面、进度与播放控制',
 	queue: '当前播放队列，点击切歌',
 	lyrics: '当前曲目歌词，随播放滚动',

@@ -3,7 +3,7 @@
  *
  * 布局（响应式）：
  *  - 顶部 glass header：品牌标识（Private Music Hub / 私人音乐平台）+ 操作区
- *    （曲库 / 背景主题 / 快捷键 / 卡片）。
+ *    （曲库 / 背景主题 / 快捷键 / 卡片 / 音乐助手）。
  *  - 主区域：可自由拉伸、可合并、可隐藏的面板布局（LayoutProvider 管理）：
  *      · 两列结构，列之间与同列面板之间都有可拖动分隔条；
  *      · 每个面板可容纳多张卡片，多于一张时以标签页切换；
@@ -16,9 +16,11 @@
  * 背景色由 ThemeProvider 在运行时写入 --bg* 变量，可在右上角「背景」切换 / 自定义。
  */
 'use client';
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useChat } from '@ai-sdk/react';
+import { DefaultChatTransport } from 'ai';
 import { APlayerPlayer } from '@/components/APlayerPlayer';
-import { AgentMount } from '@/components/AgentMount';
+import { ChatCard } from '@/components/ChatCard';
 import { GlobalHotkeys } from '@/components/GlobalHotkeys';
 import { LayoutMenu } from '@/components/LayoutMenu';
 import { LayoutProvider, useLayout } from '@/components/LayoutProvider';
@@ -30,13 +32,16 @@ import { PlayerBar } from '@/components/PlayerBar';
 import { PlayerProvider, usePlayerSnapshot } from '@/components/PlayerProvider';
 import { QueueList } from '@/components/QueueList';
 import { ShortcutsPanel } from '@/components/ShortcutsPanel';
-import { CloseIcon } from '@/components/icons';
+import { ChatIcon, CloseIcon } from '@/components/icons';
 import { SplitHandle } from '@/components/SplitHandle';
 import { ThemePanel } from '@/components/ThemePanel';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { useEscapeToClose } from '@/components/use-escape-to-close';
 import { hasModifier, isTypingTarget } from '@/components/keyboard';
 import type { CardId, ColumnIndex } from '@/components/panel-layout';
+
+/** 「唤起音乐助手卡」的窗口事件名（⌘K 与顶栏按钮共用，勿写字面量）。 */
+const OPEN_CHAT_CARD_EVENT = 'open-chat-card';
 
 /**
  * 主区可配置面板布局。
@@ -54,9 +59,38 @@ function MainPanels() {
 		hideCard,
 		movePane,
 		movePaneToColumn,
+		ensureCard,
 	} = useLayout();
 	const snap = usePlayerSnapshot();
 	const track = snap.currentTrack;
+
+	// ── 音乐助手会话 ──
+	// `useChat` 在**这里**调用而不是在 ChatCard 内：切标签页会卸载 ChatCard，
+	// 状态放在里面会把整段对话一起丢掉。本组件位于 LayoutProvider 内且始终挂载。
+	const transport = useMemo(() => new DefaultChatTransport({ api: '/api/agent' }), []);
+	const chat = useChat({ transport });
+	const { sendMessage } = chat;
+
+	// 快照用 ref 镜像，`sendToAgent` 因此不必随每次播放进度变化而重建。
+	const snapRef = useRef(snap);
+	useEffect(() => {
+		snapRef.current = snap;
+	}, [snap]);
+
+	const sendToAgent = useCallback(
+		(text: string) => {
+			// 快照随消息带上——服务端据此知道「现在在放什么」，省掉一次读状态的往返。
+			void sendMessage({ text }, { body: { snapshot: snapRef.current } });
+		},
+		[sendMessage],
+	);
+
+	// 「音乐助手」按钮 / ⌘K：确保助手卡可见并切到它所在的标签页
+	useEffect(() => {
+		const onOpenChat = () => ensureCard('chat');
+		window.addEventListener(OPEN_CHAT_CARD_EVENT, onOpenChat);
+		return () => window.removeEventListener(OPEN_CHAT_CARD_EVENT, onOpenChat);
+	}, [ensureCard]);
 
 	const rootRef = useRef<HTMLDivElement>(null);
 	const col0Ref = useRef<HTMLDivElement>(null);
@@ -119,6 +153,16 @@ function MainPanels() {
 
 	const renderCard = (card: CardId) => {
 		switch (card) {
+			case 'chat':
+				return (
+					<ChatCard
+						messages={chat.messages}
+						status={chat.status}
+						error={chat.error}
+						onSend={sendToAgent}
+						onStop={chat.stop}
+					/>
+				);
 			case 'lyrics':
 				return <LyricsPanel />;
 			case 'nowplaying':
@@ -246,6 +290,11 @@ export default function Home() {
 	// Esc 关闭队列抽屉（仅当抽屉打开时挂载监听）
 	useEscapeToClose(() => setQueueOpen(false), queueOpen);
 
+	// 「音乐助手」按钮 / ⌘K：唤起助手卡片（MainPanels 监听该事件）
+	const openChatCard = useCallback(() => {
+		window.dispatchEvent(new CustomEvent(OPEN_CHAT_CARD_EVENT));
+	}, []);
+
 	return (
 		<ThemeProvider>
 			<PlayerProvider>
@@ -269,6 +318,16 @@ export default function Home() {
 								<ThemePanel />
 								<ShortcutsPanel />
 								<LayoutMenu />
+								<button
+									type="button"
+									onClick={openChatCard}
+									aria-label="打开音乐助手"
+									title="唤起音乐助手卡片（⌘K / Ctrl+K）"
+									className="lift flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-brand-strong active:scale-95"
+								>
+									<ChatIcon size={14} />
+									<span className="hidden sm:inline">音乐助手</span>
+								</button>
 							</div>
 						</header>
 
@@ -311,10 +370,7 @@ export default function Home() {
 						<PlayerBar onToggleQueue={() => setQueueOpen((v) => !v)} />
 
 						{/* ── 全局快捷键（必须挂在 PlayerProvider 内部以读取播放快照）── */}
-						<GlobalHotkeys />
-
-						{/* ── 音乐助手对话浮层（同样需要 PlayerProvider 里的播放快照）── */}
-						<AgentMount />
+						<GlobalHotkeys onOpenChat={openChatCard} />
 					</div>
 				</LayoutProvider>
 			</PlayerProvider>

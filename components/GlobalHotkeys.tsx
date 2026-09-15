@@ -13,11 +13,12 @@
  *  - N / P         下一首 / 上一首
  *  - L             滚动到歌词区
  *  - F             全屏歌词沉浸
+ *  - ⌘K / Ctrl+K   唤起音乐助手卡片（输入框内也生效，符合全局唤起习惯）
  *
  * 不在本组件：`?` 打开快捷键清单、Esc 关闭当前面板，都在各自面板内实现。
  *
  *  guarded：在输入框 / 文本域 / 可编辑元素聚焦时，单键快捷键一律不触发，
- *  避免打字时误操作。
+ *  避免打字时误操作；⌘K 例外——它本就是全局唤起键。
  */
 'use client';
 import { useEffect, useRef } from 'react';
@@ -34,7 +35,7 @@ import { hasModifier, isTypingTarget } from '@/components/keyboard';
 const SEEK_STEP = 5; // 秒
 const VOL_STEP = 0.05;
 
-export function GlobalHotkeys() {
+export function GlobalHotkeys({ onOpenChat }: { onOpenChat?: () => void }) {
 	const snap = usePlayerSnapshot();
 	// 用 ref 镜像最新快照与播放位置，使 keydown 监听只注册一次
 	const snapRef = useRef(snap);
@@ -56,7 +57,16 @@ export function GlobalHotkeys() {
 
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
-			// 带修饰键或在输入中，一律不拦截
+			const mod = e.metaKey || e.ctrlKey;
+
+			// ⌘K / Ctrl+K：全局唤起音乐助手卡片（输入框内也生效）
+			if (mod && e.key.toLowerCase() === 'k') {
+				e.preventDefault();
+				onOpenChat?.();
+				return;
+			}
+
+			// 其余快捷键：带修饰键或在输入中，一律不拦截
 			if (hasModifier(e) || isTypingTarget(e.target)) return;
 
 			const post = (url: string) => {
@@ -148,7 +158,7 @@ export function GlobalHotkeys() {
 
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
-	}, []);
+	}, [onOpenChat]);
 
 	return null; // 纯行为组件，不渲染任何 UI
 }

@@ -21,6 +21,7 @@ import {
 import {
 	columnTotalFlex,
 	defaultLayout,
+	ensureVisible,
 	hideCard as hideCardOp,
 	loadLayout,
 	mergeInto as mergeIntoOp,
@@ -53,6 +54,8 @@ interface LayoutValue {
 	restoreCard: (card: CardId) => void;
 	movePane: (fromPaneId: string, toPaneId: string) => void;
 	movePaneToColumn: (paneId: string) => void;
+	/** 确保某卡片可见并切到它所在标签页（顶栏「音乐助手」按钮 / ⌘K 用）。 */
+	ensureCard: (card: CardId) => void;
 	resetLayout: () => void;
 }
 
@@ -126,6 +129,10 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
 		setLayout((prev) => movePaneToColumnOp(prev, paneId));
 	}, []);
 
+	const ensureCard = useCallback((card: CardId) => {
+		setLayout((prev) => ensureVisible(prev, card));
+	}, []);
+
 	const resetLayout = useCallback(() => setLayout(defaultLayout()), []);
 
 	const value = useMemo<LayoutValue>(
@@ -141,6 +148,7 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
 			restoreCard,
 			movePane,
 			movePaneToColumn,
+			ensureCard,
 			resetLayout,
 		}),
 		[
@@ -155,6 +163,7 @@ export function LayoutProvider({ children }: { children: ReactNode }) {
 			restoreCard,
 			movePane,
 			movePaneToColumn,
+			ensureCard,
 			resetLayout,
 		],
 	);
