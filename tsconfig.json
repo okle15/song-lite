@@ -27,6 +27,7 @@
   "include": [
     "next-env.d.ts",
     "next.config.ts",
+    "agent/**/*.ts",
     "app/**/*.ts",
     "app/**/*.tsx",
     "components/**/*.ts",

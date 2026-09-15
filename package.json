@@ -7,14 +7,18 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test \"components/**/*.test.ts\" \"contract/**/*.test.ts\" \"server/**/*.test.ts\"",
+    "test": "tsx --test \"agent/**/*.test.ts\" \"components/**/*.test.ts\" \"server/**/*.test.ts\"",
     "smoke:api": "node scripts/api-smoke.mjs"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.48",
+    "@ai-sdk/react": "^4.0.104",
+    "ai": "^7.0.101",
     "music-metadata": "^11.14.0",
     "next": "16.2.12",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

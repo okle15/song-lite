@@ -18,6 +18,7 @@
 'use client';
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { APlayerPlayer } from '@/components/APlayerPlayer';
+import { AgentMount } from '@/components/AgentMount';
 import { GlobalHotkeys } from '@/components/GlobalHotkeys';
 import { LayoutMenu } from '@/components/LayoutMenu';
 import { LayoutProvider, useLayout } from '@/components/LayoutProvider';
@@ -311,6 +312,9 @@ export default function Home() {
 
 						{/* ── 全局快捷键（必须挂在 PlayerProvider 内部以读取播放快照）── */}
 						<GlobalHotkeys />
+
+						{/* ── 音乐助手对话浮层（同样需要 PlayerProvider 里的播放快照）── */}
+						<AgentMount />
 					</div>
 				</LayoutProvider>
 			</PlayerProvider>
