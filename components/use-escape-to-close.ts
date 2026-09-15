@@ -57,7 +57,8 @@ export function attachEscape(
  *
  * 抽出来的原因：这个 effect 此前被手抄了 **9 遍**（FullscreenLyrics / HistoryPanel /
  * LayoutMenu / LibraryGrid / PreferencePanel / ShortcutsPanel / ThemePanel / PaneShell /
- * app/page.tsx 的队列抽屉），而且抄得并不一致：
+ * app/page.tsx 的队列抽屉），而且抄得并不一致：（其中 HistoryPanel / PreferencePanel
+ * 已随各自的子系统删除，此处保留历史说明。）
  *
  *  - 4 处挂 `document`、5 处挂 `window`（冒泡链上相邻，本页实际等价，但新人会困惑该用哪个）；
  *  - `PaneShell` 额外用了**捕获阶段 + stopPropagation**（Esc 只关内层菜单，不许顺带关掉外层抽屉）；

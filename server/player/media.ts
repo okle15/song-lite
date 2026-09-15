@@ -1,12 +1,11 @@
 /**
- * 媒体文件解析 + HTTP Range 响应 —— 音频流 / 视频流 / 歌词三个路由共用。
+ * 媒体文件解析 + HTTP Range 响应 —— 音频流（`library/stream`）与歌词
+ * （`library/lyrics`）共用。
  *
- * 抽出来的理由（2026-09-10）：`realpath + 防穿越` 这段**安全逻辑**原本在
- * `library/stream`、`library/stream-video`、`library/lyrics` 各抄一份；
- * `Range 三态响应`（206 Partial / 416 Unsatisfiable / 200 Full）在音频流与
- * 视频流里近乎逐字重复。重复本身不疼，疼的是漂移——这里漂移一次的代价是
+ * 抽出来的理由（2026-09-10）：`realpath + 防穿越` 这段**安全逻辑**原本在两个路由
+ * 各抄一份；`Range 三态响应`（206 Partial / 416 Unsatisfiable / 200 Full）
+ * 也近乎逐字重复。重复本身不疼，疼的是漂移——这里漂移一次的代价是
  * 「路径穿越被放行」或「进度条 seek 静默失效」，都极难在人工点测里发现。
- * 事实上抽出来时就已经发现两处不一致：视频流的 200 分支漏了 `Cache-Control: no-cache`。
  *
  * 依赖纪律：只用 `node:*` 与 Web 标准全局（`Response` / `ReadableStream`），
  * **不 import `next/server`**（那是 `server/http.ts` 的专属例外）。

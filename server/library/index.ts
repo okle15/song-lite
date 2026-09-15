@@ -1,56 +1,37 @@
 /**
- * Music library data source — Phase 7.
+ * Music library data source.
  *
- * Decision H2: when `MUSIC_DIR` env is set and the directory contains
- * audio files, `getSongs()` scans it with `music-metadata` (H1) and returns
- * the parsed `Song[]`. When `MUSIC_DIR` is unset or the scan returns
- * nothing, it falls back to the `MOCK_SONGS` array so the app always has
- * a working library.
+ * 曲库 = 对 `MUSIC_DIR` 的一次目录扫描（`scanner.ts`），结果在进程内 memo。
  *
- * Song shape matches decision G1: id / title / artist / album / year /
- * genre / mood / durationSec / filePath.
+ * **曲库不落库**：它的真相永远在文件系统上，再存一份到 SQLite 只会引入
+ * 「表里的行和盘上的文件对不上」这类问题。数据库只承载**扫描不出来的**东西
+ * ——目前是播放历史（见 `server/db.ts`）。
  */
 import { scanLibrary } from './scanner';
 
+/**
+ * 一首曲目 —— 只留播放链路真正用到的字段。
+ *
+ * 刻意**不含** genre / mood / year：它们早期是为电台打标与语义搜索取的，
+ * 而本曲库的 ID3 genre 全被误标（6 首中文流行全标成 blues）。没有校正层时
+ * 留着这些字段只会误导下游，索性不收。
+ */
 export type Song = {
 	id: string;
 	title: string;
 	artist: string;
 	album: string;
-	year: number;
-	genre: string;
-	mood: string;
 	durationSec: number;
+	/** 相对 MUSIC_DIR 的路径，带前导斜杠，如 '/凤鸣传奇.mp3'。 */
 	filePath: string;
-	/** 配对到的 MV 视频文件路径（mp4 等），播放器可提供「看 MV」入口；无则缺省 */
-	mvPath?: string;
 };
 
-/** Mock fallback (10 songs) used when MUSIC_DIR is not configured. */
-export const MOCK_SONGS: Song[] = [
-	{ id: 'song-001', title: 'Take Five', artist: 'Dave Brubeck Quartet', album: 'Time Out', year: 1959, genre: 'jazz', mood: 'relaxed', durationSec: 324, filePath: '/music/jazz/take-five.mp3' },
-	{ id: 'song-002', title: 'So What', artist: 'Miles Davis', album: 'Kind of Blue', year: 1959, genre: 'jazz', mood: 'cool', durationSec: 565, filePath: '/music/jazz/so-what.mp3' },
-	{ id: 'song-003', title: 'Blue in Green', artist: 'Miles Davis', album: 'Kind of Blue', year: 1959, genre: 'jazz', mood: 'melancholic', durationSec: 337, filePath: '/music/jazz/blue-in-green.mp3' },
-	{ id: 'song-004', title: 'Bohemian Rhapsody', artist: 'Queen', album: 'A Night at the Opera', year: 1975, genre: 'rock', mood: 'epic', durationSec: 354, filePath: '/music/rock/bohemian-rhapsody.mp3' },
-	{ id: 'song-005', title: 'Hotel California', artist: 'Eagles', album: 'Hotel California', year: 1977, genre: 'rock', mood: 'mysterious', durationSec: 391, filePath: '/music/rock/hotel-california.mp3' },
-	{ id: 'song-006', title: 'Clair de Lune', artist: 'Claude Debussy', album: 'Suite bergamasque', year: 1905, genre: 'classical', mood: 'peaceful', durationSec: 312, filePath: '/music/classical/clair-de-lune.mp3' },
-	{ id: 'song-007', title: 'Für Elise', artist: 'Ludwig van Beethoven', album: 'Bagatelles', year: 1810, genre: 'classical', mood: 'gentle', durationSec: 180, filePath: '/music/classical/fur-elise.mp3' },
-	{ id: 'song-008', title: 'Blinding Lights', artist: 'The Weeknd', album: 'After Hours', year: 2020, genre: 'pop', mood: 'energetic', durationSec: 200, filePath: '/music/pop/blinding-lights.mp3' },
-	{ id: 'song-009', title: 'Shape of You', artist: 'Ed Sheeran', album: '÷ (Divide)', year: 2017, genre: 'pop', mood: 'upbeat', durationSec: 233, filePath: '/music/pop/shape-of-you.mp3' },
-	{ id: 'song-010', title: 'Weightless', artist: 'Marconi Union', album: 'Weightless', year: 2011, genre: 'ambient', mood: 'calm', durationSec: 480, filePath: '/music/ambient/weightless.mp3' },
-];
-
-/**
- * Get the current library: scanned from `MUSIC_DIR` if configured and
- * non-empty, otherwise the mock fallback. Async because scanning involves
- * file I/O + metadata parsing. Results are cached by the scanner.
- */
+/** 当前曲库（扫描 `MUSIC_DIR`，结果进程内缓存）。 */
 export async function getSongs(): Promise<Song[]> {
-	const scanned = await scanLibrary();
-	return scanned.length > 0 ? scanned : MOCK_SONGS;
+	return scanLibrary();
 }
 
-/** Find a song by id (async — scans the library if configured). */
+/** Find a song by id. */
 export async function findSongById(id: string): Promise<Song | undefined> {
 	const songs = await getSongs();
 	return songs.find((song) => song.id === id);

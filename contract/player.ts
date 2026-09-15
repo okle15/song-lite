@@ -21,7 +21,7 @@ export type QueueItem = {
 /** 推给前端的精简快照（含完整 queue 数组供队列面板显示）。 */
 export type PlayerSnapshot = {
 	state: 'stopped' | 'playing' | 'paused';
-	currentTrack: { id: string; title: string; artist: string; album: string; mvPath?: string } | null;
+	currentTrack: { id: string; title: string; artist: string; album: string } | null;
 	positionSec: number;
 	queueSize: number;
 	queueIndex: number;

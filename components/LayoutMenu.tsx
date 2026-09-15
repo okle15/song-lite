@@ -4,7 +4,7 @@
  * 「卡片可以隐藏」就必须有找回来的地方，否则一旦隐藏就永久失去，
  * 只能去清 localStorage——这个入口是隐藏功能的必要配套。
  *
- * 这里列出全部 5 张卡片并支持直接开关显隐（隐藏 → 恢复），
+ * 这里列出全部 4 张卡片并支持直接开关显隐（隐藏 → 恢复），
  * 另外提供「重置为默认布局」兜底。
  */
 'use client';
@@ -15,8 +15,6 @@ import { useEscapeToClose } from './use-escape-to-close';
 import { CheckIcon, GridIcon } from './icons';
 
 const CARD_HINTS: Record<CardId, string> = {
-	overview: '统计概览与欢迎页',
-	chat: '与 AI 对话，可直接让它放歌',
 	nowplaying: '大封面、进度与播放控制',
 	queue: '当前播放队列，点击切歌',
 	lyrics: '当前曲目歌词，随播放滚动',

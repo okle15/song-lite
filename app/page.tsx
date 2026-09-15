@@ -3,10 +3,10 @@
  *
  * 布局（响应式）：
  *  - 顶部 glass header：品牌标识（Private Music Hub / 私人音乐平台）+ 操作区
- *    （曲库 / 背景主题 / 历史 / 偏好 / 快捷键 / 卡片 / 语音 / AI 对话）。
+ *    （曲库 / 背景主题 / 快捷键 / 卡片）。
  *  - 主区域：可自由拉伸、可合并、可隐藏的面板布局（LayoutProvider 管理）：
  *      · 两列结构，列之间与同列面板之间都有可拖动分隔条；
- *      · 每个面板可容纳多张卡片，多于一张时以标签页切换（概览 + AI 对话默认合并）；
+ *      · 每个面板可容纳多张卡片，多于一张时以标签页切换；
  *      · 面板标题栏 ⋯ 菜单支持与相邻面板合并 / 合并到任意面板 / 拆分 / 移到另一列 / 隐藏；
  *      · 按住标题栏左侧手柄拖到其它面板上可交换位置。
  *      布局持久化到 localStorage，刷新后保持。
@@ -16,54 +16,32 @@
  * 背景色由 ThemeProvider 在运行时写入 --bg* 变量，可在右上角「背景」切换 / 自定义。
  */
 'use client';
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { APlayerPlayer } from '@/components/APlayerPlayer';
-import { ChatCard } from '@/components/ChatCard';
 import { GlobalHotkeys } from '@/components/GlobalHotkeys';
-import { HistoryPanel } from '@/components/HistoryPanel';
 import { LayoutMenu } from '@/components/LayoutMenu';
 import { LayoutProvider, useLayout } from '@/components/LayoutProvider';
 import { LibraryGrid } from '@/components/LibraryGrid';
 import { LyricsPanel } from '@/components/LyricsPanel';
 import { NowPlaying } from '@/components/NowPlaying';
-import { OverviewCard } from '@/components/OverviewCard';
 import { PaneShell, paneLabel } from '@/components/PaneShell';
-import { PreferencePanel } from '@/components/PreferencePanel';
-import { RadioButton } from '@/components/RadioButton';
 import { PlayerBar } from '@/components/PlayerBar';
 import { PlayerProvider, usePlayerSnapshot } from '@/components/PlayerProvider';
 import { QueueList } from '@/components/QueueList';
 import { ShortcutsPanel } from '@/components/ShortcutsPanel';
-import { ChatIcon, CloseIcon } from '@/components/icons';
+import { CloseIcon } from '@/components/icons';
 import { SplitHandle } from '@/components/SplitHandle';
 import { ThemePanel } from '@/components/ThemePanel';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { useEscapeToClose } from '@/components/use-escape-to-close';
-import { VoiceButton } from '@/components/VoiceButton';
-import { useChatStream } from '@/components/use-chat-stream';
 import { hasModifier, isTypingTarget } from '@/components/keyboard';
 import type { CardId, ColumnIndex } from '@/components/panel-layout';
-
-const UID_KEY = 'music-assistant-uid';
-
-/** 「唤起 AI 对话卡」的窗口事件名（⌘K 热键与顶栏按钮共用，勿写字面量）。 */
-const OPEN_CHAT_CARD_EVENT = 'open-chat-card';
-
-function getOrCreateUserId(): string {
-	if (typeof window === 'undefined') return 'anon';
-	let id = window.localStorage.getItem(UID_KEY);
-	if (!id) {
-		id = `user-${Math.random().toString(36).slice(2, 10)}`;
-		window.localStorage.setItem(UID_KEY, id);
-	}
-	return id;
-}
 
 /**
  * 主区可配置面板布局。
  * 必须挂在 PlayerProvider 内部才能读播放快照（歌词 / 队列标题需要曲目信息）。
  */
-function MainPanels({ chat }: { chat: ReturnType<typeof useChatStream> }) {
+function MainPanels() {
 	const {
 		layout,
 		resizePanes,
@@ -75,7 +53,6 @@ function MainPanels({ chat }: { chat: ReturnType<typeof useChatStream> }) {
 		hideCard,
 		movePane,
 		movePaneToColumn,
-		ensureCard,
 	} = useLayout();
 	const snap = usePlayerSnapshot();
 	const track = snap.currentTrack;
@@ -139,19 +116,8 @@ function MainPanels({ chat }: { chat: ReturnType<typeof useChatStream> }) {
 			?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 	}, [focusedPaneId]);
 
-	// 「AI 对话」按钮 / ⌘K：确保对话卡可见并切到它所在的标签页
-	useEffect(() => {
-		const onOpenChat = () => ensureCard('chat');
-		window.addEventListener(OPEN_CHAT_CARD_EVENT, onOpenChat);
-		return () => window.removeEventListener(OPEN_CHAT_CARD_EVENT, onOpenChat);
-	}, [ensureCard]);
-
 	const renderCard = (card: CardId) => {
 		switch (card) {
-			case 'overview':
-				return <OverviewCard />;
-			case 'chat':
-				return <ChatCard chat={chat} />;
 			case 'lyrics':
 				return <LyricsPanel />;
 			case 'nowplaying':
@@ -274,30 +240,10 @@ function MainPanels({ chat }: { chat: ReturnType<typeof useChatStream> }) {
 }
 
 export default function Home() {
-	const [userId, setUserId] = useState('anon');
 	const [queueOpen, setQueueOpen] = useState(false);
-	const chat = useChatStream(userId);
-
-	// 客户端挂载后再读取真实 userId，避免 SSR 水合不一致。
-	useEffect(() => {
-		// eslint-disable-next-line react-hooks/set-state-in-effect
-		setUserId(getOrCreateUserId());
-	}, []);
 
 	// Esc 关闭队列抽屉（仅当抽屉打开时挂载监听）
 	useEscapeToClose(() => setQueueOpen(false), queueOpen);
-
-	const handleTranscript = useCallback(
-		(text: string) => {
-			chat.send(text);
-		},
-		[chat],
-	);
-
-	// 「AI 对话」按钮 / ⌘K：唤起对话卡（MainPanels 监听该事件）
-	const openChatCard = useCallback(() => {
-		window.dispatchEvent(new CustomEvent(OPEN_CHAT_CARD_EVENT));
-	}, []);
 
 	return (
 		<ThemeProvider>
@@ -320,27 +266,14 @@ export default function Home() {
 							<div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
 								<LibraryGrid />
 								<ThemePanel />
-								<HistoryPanel />
-								<PreferencePanel />
 								<ShortcutsPanel />
 								<LayoutMenu />
-								<RadioButton />
-								<VoiceButton onTranscript={handleTranscript} />
-								<button
-									type="button"
-									onClick={openChatCard}
-									aria-label="打开 AI 对话"
-									className="lift flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:bg-brand-strong active:scale-95"
-								>
-									<ChatIcon size={14} />
-									<span className="hidden sm:inline">AI 对话</span>
-								</button>
 							</div>
 						</header>
 
 						{/* ── 主区域：可拉伸 / 可合并 / 可隐藏的面板布局 ── */}
 						<main className="scroll-area min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">
-							<MainPanels chat={chat} />
+							<MainPanels />
 						</main>
 
 						{/* ── 队列抽屉（底部滑出，移动端主入口） ── */}
@@ -377,7 +310,7 @@ export default function Home() {
 						<PlayerBar onToggleQueue={() => setQueueOpen((v) => !v)} />
 
 						{/* ── 全局快捷键（必须挂在 PlayerProvider 内部以读取播放快照）── */}
-						<GlobalHotkeys onOpenChat={openChatCard} />
+						<GlobalHotkeys />
 					</div>
 				</LayoutProvider>
 			</PlayerProvider>

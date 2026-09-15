@@ -1,22 +1,20 @@
 /**
- * Stream route — 方案 C 音频流端点。
+ * Stream route — 音频流端点。
  *
  * `GET /api/library/stream?trackId=<id>` 返回原始音频字节流，前端 `<audio>`
  * 元素直接消费。支持 HTTP Range 请求（拖动进度条 / seek）。
  *
- * 路径解析与 Range 响应构造已抽到 `server/player/media.ts`（2026-09-10）——原先这段
- * 与 `stream-video`、`lyrics` 三处各抄一份，抽出来时已发现两处漂移。
+ * 路径解析与 Range 响应构造走 `server/player/media.ts`，与 `lyrics` 共用同一份安全逻辑。
  *
  * 错误：
  * - 400 trackId 缺失
- * - 404 歌曲不在库 / 文件不存在（mock 歌曲）
+ * - 404 歌曲不在库 / 文件不存在
  * - 403 路径穿越
- * - 503 未配置 MUSIC_DIR 且无演示目录
+ * - 503 未配置 MUSIC_DIR
  */
 import { stat } from 'node:fs/promises';
 import { findSongById } from '@/server/library';
 import { resolveMusicDir } from '@/server/library/music-dir';
-import { enqueueLazy } from '@/server/radio/tagger';
 import { fail } from '@/server/http';
 import { contentTypeFor, mediaResponse, resolveMusicFile } from '@/server/player/media';
 
@@ -39,7 +37,7 @@ export async function GET(request: Request) {
 
 	const musicDir = resolveMusicDir();
 	if (!musicDir) {
-		return fail('MUSIC_DIR not configured and no demo library present', 503);
+		return fail('MUSIC_DIR not configured', 503);
 	}
 
 	const song = await findSongById(trackId);
@@ -47,16 +45,12 @@ export async function GET(request: Request) {
 		return fail(`track not found: ${trackId}`, 404);
 	}
 
-	// 「边放边判断」钩子：任何真实播放都会经过这里拉流 —— 顺手把还没
-	// LLM 标签的歌塞进串行后台队列（fire-and-forget，不阻塞音频响应）。
-	enqueueLazy(trackId);
-
-	// Song.filePath 形如 '/jazz/take-five.wav'，带前导斜杠。
+	// Song.filePath 形如 '/凤鸣传奇.mp3'，带前导斜杠。
 	const relPath = song.filePath;
 	const resolved = await resolveMusicFile(relPath);
 	if (!resolved.ok) {
 		if (resolved.reason === 'traversal') return fail('path traversal blocked', 403);
-		return fail(`file not on disk: ${relPath.replace(/^\/+/, '')} (mock song?)`, 404);
+		return fail(`file not on disk: ${relPath.replace(/^\/+/, '')}`, 404);
 	}
 
 	let size: number;

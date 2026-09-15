@@ -67,7 +67,6 @@ export function getSnapshot(): PlayerSnapshot {
 					title: currentTrack.title,
 					artist: currentTrack.artist,
 					album: currentTrack.album,
-					mvPath: currentTrack.mvPath,
 				}
 			: null,
 		positionSec,

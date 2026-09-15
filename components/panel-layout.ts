@@ -1,7 +1,7 @@
 /**
  * 可配置面板布局：类型 / 默认值 / 持久化 / 变更操作。
  *
- * 需求：概览、正在播放、播放队列、歌词、AI 对话 5 张卡片要能
+ * 需求：歌词、正在播放、播放队列 3 张卡片要能
  *   1) 自由拉伸（Pane 之间的分隔条调高度，两列之间调宽度）
  *   2) 合并成标签页（一个 Pane 内放多张卡片，Tab 切换）
  *   3) 隐藏 / 恢复
@@ -11,17 +11,15 @@
  * 尺寸一律用相对 flex 值（不存像素），这样窗口缩放、跨设备读取都不会错位。
  */
 
-export type CardId = 'overview' | 'lyrics' | 'nowplaying' | 'queue' | 'chat';
+export type CardId = 'lyrics' | 'nowplaying' | 'queue';
 
 export const CARD_LABELS: Record<CardId, string> = {
-	overview: '概览',
 	lyrics: '歌词',
 	nowplaying: '正在播放',
 	queue: '播放队列',
-	chat: 'AI 对话',
 };
 
-export const ALL_CARD_IDS: CardId[] = ['overview', 'lyrics', 'nowplaying', 'queue', 'chat'];
+export const ALL_CARD_IDS: CardId[] = ['lyrics', 'nowplaying', 'queue'];
 
 export type Pane = {
 	id: string;
@@ -52,23 +50,12 @@ export type Layout = {
 const STORAGE_KEY = 'music-panel-layout';
 
 /**
- * 默认布局：左列 =（概览 + AI 对话 合并为标签页）/ 歌词，右列 = 正在播放 / 播放队列。
- *
- * 概览与 AI 对话默认合并，是为了延续此前的「一张卡片左右滑动切换」习惯；
- * 用户随时可以在面板 ⋯ 菜单里点「拆分为独立面板」把它们分开。
+ * 默认布局：左列 = 歌词，右列 = 正在播放 / 播放队列。
  */
 export function defaultLayout(): Layout {
 	return {
 		columns: [
-			[
-				{
-					id: 'pane-overview',
-					cards: ['overview', 'chat'],
-					active: 'overview',
-					flex: 1.5,
-				},
-				{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.5 },
-			],
+			[{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.5 }],
 			[
 				{ id: 'pane-nowplaying', cards: ['nowplaying'], active: 'nowplaying', flex: 1.25 },
 				{ id: 'pane-queue', cards: ['queue'], active: 'queue', flex: 1.25 },
@@ -421,14 +408,4 @@ export function restoreCard(layout: Layout, card: CardId, col?: ColumnIndex): La
 		columns: draft,
 		hidden: layout.hidden.filter((c) => c !== card),
 	};
-}
-
-/** 确保某卡片可见并激活（顶栏按钮 / ⌘K 用）。 */
-export function ensureVisible(layout: Layout, card: CardId): Layout {
-	if (layout.hidden.includes(card)) return restoreCard(layout, card);
-	const at = locate(layout, card);
-	if (!at) return layout;
-	const pane = layout.columns[at.col][at.paneIdx];
-	if (pane.active === card) return layout;
-	return setActiveCard(layout, pane.id, card);
 }

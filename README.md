@@ -1,102 +1,115 @@
-# Private Music Hub · song-lite
+# song-lite
 
-一个**可运行的最小音乐平台**：**只有前端 + BFF，没有任何 Agent 代码**。
+一个**只做本地播放**的个人音乐助手。没有账号、没有云同步、没有后台服务，
+`next start` 起来就是一个能听歌的页面。
 
-播放、搜索、歌词、队列、电台、历史统计全部可用；右下角「AI 对话」
-打的是 `/api/chat` —— 该路由是个**占位实现**，只回一句固定文本。
+它同时是一个**底座**：功能刻意削到最简（前端播放 + 支撑它的 API + 一张播放历史表），
+后续能力（推荐、电台、Agent 对话…）在这个底座上慢慢加。
 
-```
-┌──────────────┐  fetch /api/**   ┌──────────────────────────────────────┐
-│ components/  │ ───────────────► │ app/api/**  BFF 路由（17 个）         │
-│  React UI    │ ◄─────────────── │  统一信封 {code,data,message}        │
-└──────┬───────┘  SSE /api/chat   └──────────────────┬───────────────────┘
-       │                                             ▼
-       │                              server/**  业务实现（player/library/
-       └── 播放器事件走 SSE            radio/records/user/llm）
-```
+---
 
 ## 快速开始
 
 ```bash
 npm install
-npm run build && npm start -- -p 3100     # 生产模式：验证一律走这里
-# 开发模式（Turbopack dev 下 SSE 首连接会挂起，属 dev-only）
-npm run dev
+cp .env.example .env.local        # 至少填 MUSIC_DIR
+npm run build && npm start -- -p 3100
+# 打开 http://127.0.0.1:3100
 ```
 
-打开 http://127.0.0.1:3100 —— 左侧「曲库」选一首即可播放，底部播放条切歌。
+`.env.local` 里**只有 `MUSIC_DIR` 真正影响功能**：不设时曲库为空（没有 mock 兜底，
+不会假装有歌）。
 
-其它命令：
+---
 
-| 命令 | 作用 |
-|:--|:--|
-| `npm test` | 单测（node:test + node:assert，无额外框架） |
-| `npm run lint` | ESLint |
-| `npm run smoke:api` | 逐个探测 BFF 端点（需服务已启动） |
+## 功能边界
+
+**有**：曲库浏览与搜索、点击播放、进度拖动、上下首、播放队列、播放模式（顺序 / 列表循环 /
+单曲循环 / 随机）、歌词（含全屏沉浸页）、音量 / 静音、背景主题、可拖拽可合并的多面板布局、
+全局快捷键、播放历史落库。
+
+**没有**（曾有过，2026-09-15 随最简化删除）：电台、偏好设置、AI 对话、语音输入、
+MV 视频播放、统计概览、LLM 打标。要恢复它们，看 git 历史（`RADIO.md` 一并删除）。
+
+---
 
 ## 目录结构
 
-| 目录 | 职责 | 依赖方向 |
-|:--|:--|:--|
-| `app/` | 路由层。`page.tsx`/`layout.tsx` 是应用外壳；`api/**` 是 17 个 BFF 端点，**不写业务实现** | → `server/` |
-| `components/` | 浏览器侧 React 组件（播放器 / 歌词 / 队列 / 面板布局 / 对话气泡） | 只读 `contract/` |
-| `contract/` | 前端与 `server/` **共用**的协议与 wire 类型，**零业务依赖** | 叶子层 |
-| `server/` | 业务实现：`player/ library/ radio/ records/ user/ llm/`。不认识 `Request`/`Response` | → `contract/` |
-| `scripts/` | 接口体检脚本 | — |
-| `data/` | 曲库音频（`data/music/*.mp3`）+ SQLite 库 + JSON 存储 | — |
+```
+app/            只放路由。页面外壳在 page.tsx，其余全是 app/api/**/route.ts
+components/     浏览器侧（不设 lib/ 子目录）。纯函数模块的单测就近放
+contract/       前后端共享契约，零业务依赖（player.ts 是 SSE 的 wire 类型）
+server/         业务实现。根只留 http.ts（信封）与 db.ts（连接）
+  library/      曲库：扫描 / 搜索 / 目录解析
+  player/       播放状态机 / 音频流 / 响应体
+  records/      播放历史读写
+scripts/        api-smoke.mjs —— 接口体检
+data/           music/（曲库源码资产）+ app.db（运行时派生，见 .gitignore）
+```
 
-**没有的目录**：`agent/`、`telemetry/`、`eval/`（连同 `architecture.test.ts`）
-已整体移除。`song` 仓库里有这些，需要时去那边看实现。
+---
 
-## 接口清单
+## API 一览（10 个）
 
-**全部 17 个端点都被前端实际调用**，没有「留给将来」的接口：
+| 方法 | 路径 | 说明 |
+|:---|:---|:---|
+| GET | `/api/library/search?q=&limit=` | 曲库检索（`q` 空 = 整库），标题/歌手/专辑子串匹配 |
+| GET | `/api/library/stream?trackId=` | 音频字节流，支持 Range（seek 靠它） |
+| GET | `/api/library/lyrics?trackId=&raw=` | LRC 歌词；`raw=1` 返回 text/plain |
+| GET | `/api/player/events` | **SSE**，播放状态的唯一推送源 |
+| GET/POST | `/api/player/play` | GET 轮询当前状态；POST `{trackId}` 点播 |
+| POST | `/api/player/pause` · `/resume` | 暂停 / 续播（无播放中 → 409） |
+| POST | `/api/player/next` | 下一首；到队尾返回 `stopped` |
+| POST | `/api/player/jump` | `{index}` 跳到队列第 index 首 |
+| GET | `/api/history?limit=` | 播放历史，时间倒序（默认 20，上限 200） |
 
-| 端点 | 用途 |
-|:--|:--|
-| `POST /api/chat` | 对话面板（**当前为占位**） |
-| `GET /api/library/search?q=` | 曲库搜索（服务端搜索 + 250ms debounce） |
-| `GET /api/library/stream?trackId=` | 音频流（支持 Range → 206） |
-| `GET /api/library/stream-video?trackId=` | MV 播放（曲目未配对 MV 时不可用） |
-| `GET /api/library/lyrics?trackId=&raw=1` | LRC 歌词 |
-| `GET /api/player/events` | **播放器状态 SSE**（前端唯一的状态来源） |
-| `POST /api/player/play` · `pause` · `resume` · `next` · `jump` | 播放控制 |
-| `GET /api/logs` | 历史 / 统计面板 |
-| `GET\|PUT\|DELETE /api/preferences` | 偏好面板 |
-| `POST /api/radio/start` · `stop` · `GET /api/radio/now` | 电台按钮与栏目轮询 |
-| `POST /api/voice` | 语音转写（Whisper 后端） |
+**统一信封**：所有 JSON 路由返回 `{ code, data?, message }`。
+`code === 0` 表示成功（**不是 200**），失败时 `code` 等于 HTTP status。
+构造只允许在 `server/http.ts` 的 `ok()` / `fail()` 里发生，路由不许手写信封。
 
-## 对话接口：现状
+---
 
-`app/api/chat/route.ts` 只做三件事：校验请求体（`{message, userId}`）、
-按 **AI SDK 原生 UI 消息流**回一段固定文本、以**裸 `data: [DONE]`** 收尾。
+## 数据与持久化
 
-它刻意保持了与真实 Agent 一致的线格式（`x-vercel-ai-ui-message-stream: v1`
-响应头 + `start`/`text-start`/`text-delta`/`text-end`/`finish` 五帧），
-所以前端 `components/use-chat-stream.ts` 与共享装配层 `contract/chat-chunks.ts`
-不需要为此做任何适配 —— 将来要换成真 Agent 时，只需替换这一个路由里的
-「产出流」那一步，请求校验、响应头、错误信封（`server/http.ts` 的 `fail()`）
-都不用动。
+**曲库不落库。** 曲目是对 `MUSIC_DIR` 的一次目录扫描（`server/library/scanner.ts`），
+进程内 memo。真相永远在文件系统上，再存一份到 SQLite 只会引入
+「表里的行和盘上的文件对不上」这类问题。
 
-## 数据
+**数据库只存扫描不出来的东西** —— 目前只有播放历史：
 
-| 路径 | 内容 |
-|:--|:--|
-| `data/music/` | 曲库音频 + 同名 `.lrc` 歌词（扫描器按目录实时索引） |
-| `data/logs.db` | 播放等本地操作流水，前端「历史 / 统计」面板读它 |
-| `data/radio.db` | 电台曲目画像 + 节目史 |
-| `data/preferences.json`、`data/lexicon-learned.json` | 用户偏好副本、已学到的新词映射 |
+```
+data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
+  plays(id, track_id, title, artist, started_at)
+```
 
-换曲库：改 `.env.local` 的 `MUSIC_DIR`，或把音频丢进 `data/music/`（重启后自动识别）。
+- 建表语句**只在 `server/db.ts`** 出现。加表就往 `migrate()` 里追加一条。
+- 写入时机：`/api/player/{play,next,jump}` **成功切歌**时记一行（`pause`/`resume` 不算新播放）。
+- 刻意**不开 WAL**：默认 journal 模式下落盘只有单个 `.db`，不留 `-wal` / `-shm` 尾巴，
+  「删一个文件就干净」。
+- 删掉 `data/app.db` 即归零，服务下次写入时自动重建。
 
-## 进一步阅读
+---
 
-- [RADIO.md](./RADIO.md) —— 电台子系统（排片 / 打分 / 口播 / 边播补标 / 中文语义解析）
-- [AGENTS.md](./AGENTS.md) —— 协作与验证规则
+## 验证
 
-## 与 `song` 的关系
+```bash
+npm run lint        # ESLint
+npx tsc --noEmit    # 全仓类型检查
+npm test            # 单测（node:test，纯函数模块）
+npm run build       # 生产构建
+BASE=http://127.0.0.1:3100 npm run smoke:api   # 接口冒烟（需先起服务）
+```
 
-`song` 是功能完整的版本（Agent + 工具 + 离线评估体系）。
-本仓库从它复制了**前端与 BFF 的全部实现**（这两部分逐字节未改），
-然后清掉了 Agent、评估旁路，以及所有前端未调用的端点。需要某块能力时，
-去 `song` 对应目录抄回来即可。
+前端回归**一律走生产模式**（`npm run build && npm start -- -p 3100`），
+不要在 dev 下排查 SSE——Turbopack dev 的 SSE 首连接会挂起，那是 dev-only 现象。
+
+`scripts/api-smoke.mjs` 会顺带断言**信封不变式**（`code` 与 HTTP status 一致），
+以及「播放之后历史确实落库了」。
+
+---
+
+## 文档索引
+
+| 文档 | 何时读 |
+|:---|:---|
+| [AGENTS.md](./AGENTS.md) | 改代码前必读：协作红线、验证与调试、目录约定 |

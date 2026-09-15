@@ -28,7 +28,6 @@ import {
 } from './player-events';
 import { gradientFor } from '@/components/cover';
 import {
-	CloseIcon,
 	ListLoopIcon,
 	NextIcon,
 	OneLoopIcon,
@@ -45,62 +44,6 @@ const MODE_NOWPLAYING_ICON = {
 	one: OneLoopIcon,
 } as const;
 
-/** MV 浮层 —— 音频照常播放，视频按需观看（<video> 独立拉流，不抢音频通道）。 */
-function MvPanel({ trackId, onClose }: { trackId: string; onClose: () => void }) {
-	const videoRef = useRef<HTMLVideoElement>(null);
-	const posRef = useRef(0);
-	const [synced, setSynced] = useState(false);
-
-	// 记录最新音频进度；「对齐进度」把视频 seek 过去（秒级粗同步足够）
-	useEffect(() => {
-		const onTime = (e: Event) => {
-			const t = (e as CustomEvent<number>).detail;
-			if (typeof t === 'number') posRef.current = t;
-		};
-		window.addEventListener(PLAYER_EVENTS.time, onTime);
-		return () => window.removeEventListener(PLAYER_EVENTS.time, onTime);
-	}, []);
-
-	const syncToAudio = () => {
-		if (videoRef.current) {
-			videoRef.current.currentTime = posRef.current;
-			setSynced(true);
-			setTimeout(() => setSynced(false), 1500);
-		}
-	};
-
-	return (
-		<div className="fixed bottom-24 right-4 z-40 w-72 overflow-hidden rounded-2xl border border-border shadow-2xl sm:w-80">
-			<div className="flex items-center justify-between border-b border-border bg-surface px-3 py-1.5">
-				<span className="text-[11px] font-medium">MV · 音频与画面独立播放</span>
-				<div className="flex items-center gap-1">
-					<button
-						type="button"
-						onClick={syncToAudio}
-						className="rounded px-1.5 py-0.5 text-[10px] text-muted transition hover:bg-surface-2 hover:text-foreground"
-					>
-						{synced ? '已对齐 ✓' : '对齐进度'}
-					</button>
-					<button
-						type="button"
-						onClick={onClose}
-						aria-label="关闭 MV"
-						className="rounded p-1 text-muted transition hover:bg-surface-2 hover:text-foreground"
-					>
-						<CloseIcon size={14} />
-					</button>
-				</div>
-			</div>
-			<video
-				ref={videoRef}
-				src={`/api/library/stream-video?trackId=${encodeURIComponent(trackId)}`}
-				controls
-				className="block w-full bg-black"
-			/>
-		</div>
-	);
-}
-
 export function NowPlaying() {
 	const snap = usePlayerSnapshot();
 	const track = snap.currentTrack;
@@ -113,7 +56,6 @@ export function NowPlaying() {
 	const [mode, setMode] = useState<PlaybackMode>('seq');
 	const [shuffleOn, setShuffleOn] = useState(false);
 	const [dragging, setDragging] = useState(false);
-	const [mvOpen, setMvOpen] = useState(false);
 
 	const posRef = useRef(0);
 	const barRef = useRef<HTMLDivElement>(null);
@@ -364,21 +306,6 @@ export function NowPlaying() {
 					))}
 				</div>
 
-				{/* 看 MV：仅当曲目配对了视频时出现；音频照常，视频按需拉流 */}
-				{track?.mvPath && (
-					<div className="mt-3 flex justify-center">
-						<button
-							type="button"
-							onClick={() => setMvOpen((v) => !v)}
-							aria-pressed={mvOpen}
-							className="lift flex items-center gap-1.5 rounded-full border border-border px-3 py-1 text-[11px] text-muted transition hover:border-brand/40 hover:text-foreground"
-						>
-<PlayIcon size={12} className="opacity-90" />
-							{mvOpen ? '收起 MV' : '看 MV'}
-						</button>
-					</div>
-				)}
-
 				{/* 播放模式胶囊组 */}
 				<div className="mt-3 flex justify-center border-t border-border pt-3">
 					<div className="flex gap-1 rounded-full border border-border bg-surface-2 p-1" role="radiogroup" aria-label="播放模式">
@@ -400,11 +327,6 @@ export function NowPlaying() {
 						})}
 					</div>
 				</div>
-
-				{/* MV 浮层（音频与画面独立播放，见 MvPanel） */}
-				{mvOpen && track?.mvPath && (
-					<MvPanel trackId={track.id} onClose={() => setMvOpen(false)} />
-				)}
 			</div>
 		</div>
 	);

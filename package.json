@@ -11,13 +11,10 @@
     "smoke:api": "node scripts/api-smoke.mjs"
   },
   "dependencies": {
-    "@ai-sdk/openai-compatible": "^3.0.47",
-    "ai": "^7.0.97",
     "music-metadata": "^11.14.0",
     "next": "16.2.12",
     "react": "19.2.4",
-    "react-dom": "19.2.4",
-    "zod": "^4.0.0"
+    "react-dom": "19.2.4"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

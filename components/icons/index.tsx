@@ -184,52 +184,6 @@ export function SearchIcon({ size = 16, ...rest }: IconProps) {
   );
 }
 
-/** 播放历史：时钟 + 回退箭头。 */
-export function HistoryIcon({ size = 16, ...rest }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
-      <path d="M3.4 12a8.6 8.6 0 1 0 2.6-6.2L3.4 8.4" />
-      <path d="M3.4 3.8v4.6h4.6" />
-      <path d="M12 7.6v4.8l3.4 2" />
-    </svg>
-  );
-}
-
-/** 电台广播：中心点 + 同心波。 */
-export function RadioIcon({ size = 16, ...rest }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
-      <circle cx="12" cy="12" r="1.5" />
-      <path d="M9 8.6a4.8 4.8 0 0 0 0 6.8" />
-      <path d="M15 8.6a4.8 4.8 0 0 1 0 6.8" />
-      <path d="M6.4 5.8a9.2 9.2 0 0 0 0 12.4" />
-      <path d="M17.6 5.8a9.2 9.2 0 0 1 0 12.4" />
-    </svg>
-  );
-}
-
-/** 语音（麦克风）。 */
-export function VoiceIcon({ size = 16, ...rest }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
-      <path d="M12 3.6a3.2 3.2 0 0 1 3.2 3.2v5.4a3.2 3.2 0 0 1-6.4 0V6.8A3.2 3.2 0 0 1 12 3.6Z" />
-      <path d="M5.8 11.8v.2a6.2 6.2 0 0 0 12.4 0v-.2" />
-      <path d="M12 18v3" />
-    </svg>
-  );
-}
-
-/** 偏好设置（滑杆 + 双圆点）。 */
-export function SettingsIcon({ size = 16, ...rest }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
-      <path d="M20.2 7.2H9.6M14.4 16.8H3.8" />
-      <circle cx="6.8" cy="7.2" r="2.6" />
-      <circle cx="17.2" cy="16.8" r="2.6" />
-    </svg>
-  );
-}
-
 /** 背景主题（调色板：外环 + 四个品牌色点缀）。 */
 export function ThemeIcon({ size = 16, ...rest }: IconProps) {
   return (
@@ -264,15 +218,6 @@ export function CloseIcon({ size = 16, ...rest }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
       <path d="m6.6 6.6 10.8 10.8M17.4 6.6 6.6 17.4" />
-    </svg>
-  );
-}
-
-/** 聊天气泡（AI 对话 / 消息入口）。 */
-export function ChatIcon({ size = 16, ...rest }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
     </svg>
   );
 }
@@ -319,16 +264,6 @@ export function GridIcon({ size = 16, ...rest }: IconProps) {
       <rect x="12.9" y="3.5" width="7.6" height="7.6" rx="1.8" />
       <rect x="3.5" y="12.9" width="7.6" height="7.6" rx="1.8" />
       <rect x="12.9" y="12.9" width="7.6" height="7.6" rx="1.8" />
-    </svg>
-  );
-}
-
-/** 发送消息（纸飞机）。 */
-export function SendIcon({ size = 16, ...rest }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
-      <path d="M21.4 2.6 3 11l8.2 2.5 2.5 8.2z" />
-      <path d="M11.2 13.5 21.4 2.6" />
     </svg>
   );
 }
