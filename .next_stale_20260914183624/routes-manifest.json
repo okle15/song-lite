@@ -1,0 +1,237 @@
+{
+  "version": 3,
+  "pages404": true,
+  "appType": "app",
+  "caseSensitive": false,
+  "basePath": "",
+  "redirects": [
+    {
+      "source": "/:path+/",
+      "destination": "/:path+",
+      "internal": true,
+      "priority": true,
+      "statusCode": 308,
+      "regex": "^(?:/((?:[^/]+?)(?:/(?:[^/]+?))*))/$"
+    }
+  ],
+  "headers": [],
+  "onMatchHeaders": [],
+  "rewrites": {
+    "beforeFiles": [],
+    "afterFiles": [],
+    "fallback": []
+  },
+  "dynamicRoutes": [],
+  "staticRoutes": [
+    {
+      "page": "/",
+      "regex": "^/(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/(?:/)?$"
+    },
+    {
+      "page": "/_global-error",
+      "regex": "^/_global\\-error(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_global\\-error(?:/)?$"
+    },
+    {
+      "page": "/_not-found",
+      "regex": "^/_not\\-found(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/_not\\-found(?:/)?$"
+    },
+    {
+      "page": "/api/chat",
+      "regex": "^/api/chat(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/chat(?:/)?$"
+    },
+    {
+      "page": "/api/library/lyrics",
+      "regex": "^/api/library/lyrics(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/lyrics(?:/)?$"
+    },
+    {
+      "page": "/api/library/organize",
+      "regex": "^/api/library/organize(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/organize(?:/)?$"
+    },
+    {
+      "page": "/api/library/playlists",
+      "regex": "^/api/library/playlists(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/playlists(?:/)?$"
+    },
+    {
+      "page": "/api/library/search",
+      "regex": "^/api/library/search(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/search(?:/)?$"
+    },
+    {
+      "page": "/api/library/stream",
+      "regex": "^/api/library/stream(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/stream(?:/)?$"
+    },
+    {
+      "page": "/api/library/stream-video",
+      "regex": "^/api/library/stream\\-video(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/stream\\-video(?:/)?$"
+    },
+    {
+      "page": "/api/library/tag",
+      "regex": "^/api/library/tag(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/tag(?:/)?$"
+    },
+    {
+      "page": "/api/library/tags",
+      "regex": "^/api/library/tags(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/tags(?:/)?$"
+    },
+    {
+      "page": "/api/library/videos",
+      "regex": "^/api/library/videos(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/library/videos(?:/)?$"
+    },
+    {
+      "page": "/api/logs",
+      "regex": "^/api/logs(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/logs(?:/)?$"
+    },
+    {
+      "page": "/api/memory",
+      "regex": "^/api/memory(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/memory(?:/)?$"
+    },
+    {
+      "page": "/api/player/events",
+      "regex": "^/api/player/events(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/player/events(?:/)?$"
+    },
+    {
+      "page": "/api/player/jump",
+      "regex": "^/api/player/jump(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/player/jump(?:/)?$"
+    },
+    {
+      "page": "/api/player/next",
+      "regex": "^/api/player/next(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/player/next(?:/)?$"
+    },
+    {
+      "page": "/api/player/pause",
+      "regex": "^/api/player/pause(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/player/pause(?:/)?$"
+    },
+    {
+      "page": "/api/player/play",
+      "regex": "^/api/player/play(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/player/play(?:/)?$"
+    },
+    {
+      "page": "/api/player/recent",
+      "regex": "^/api/player/recent(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/player/recent(?:/)?$"
+    },
+    {
+      "page": "/api/player/remove",
+      "regex": "^/api/player/remove(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/player/remove(?:/)?$"
+    },
+    {
+      "page": "/api/player/resume",
+      "regex": "^/api/player/resume(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/player/resume(?:/)?$"
+    },
+    {
+      "page": "/api/playlists/import",
+      "regex": "^/api/playlists/import(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/playlists/import(?:/)?$"
+    },
+    {
+      "page": "/api/preferences",
+      "regex": "^/api/preferences(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/preferences(?:/)?$"
+    },
+    {
+      "page": "/api/radio/lexicon",
+      "regex": "^/api/radio/lexicon(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/radio/lexicon(?:/)?$"
+    },
+    {
+      "page": "/api/radio/now",
+      "regex": "^/api/radio/now(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/radio/now(?:/)?$"
+    },
+    {
+      "page": "/api/radio/request",
+      "regex": "^/api/radio/request(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/radio/request(?:/)?$"
+    },
+    {
+      "page": "/api/radio/start",
+      "regex": "^/api/radio/start(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/radio/start(?:/)?$"
+    },
+    {
+      "page": "/api/radio/stop",
+      "regex": "^/api/radio/stop(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/radio/stop(?:/)?$"
+    },
+    {
+      "page": "/api/voice",
+      "regex": "^/api/voice(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/api/voice(?:/)?$"
+    },
+    {
+      "page": "/favicon.ico",
+      "regex": "^/favicon\\.ico(?:/)?$",
+      "routeKeys": {},
+      "namedRegex": "^/favicon\\.ico(?:/)?$"
+    }
+  ],
+  "dataRoutes": [],
+  "rsc": {
+    "header": "rsc",
+    "varyHeader": "rsc, next-router-state-tree, next-router-prefetch, next-router-segment-prefetch",
+    "prefetchHeader": "next-router-prefetch",
+    "didPostponeHeader": "x-nextjs-postponed",
+    "contentTypeHeader": "text/x-component",
+    "suffix": ".rsc",
+    "prefetchSegmentHeader": "next-router-segment-prefetch",
+    "prefetchSegmentSuffix": ".segment.rsc",
+    "prefetchSegmentDirSuffix": ".segments",
+    "clientParamParsing": false,
+    "dynamicRSCPrerender": false
+  },
+  "rewriteHeaders": {
+    "pathHeader": "x-nextjs-rewritten-path",
+    "queryHeader": "x-nextjs-rewritten-query"
+  }
+}

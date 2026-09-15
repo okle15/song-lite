@@ -1,0 +1,90 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# 音乐助手运行时数据（决策 O2）
+# Next.js 端
+/data/eval.db
+/data/eval.db-wal
+/data/eval.db-shm
+/data/logs/*.jsonl
+/data/logs/*.jsonl.migrated
+/data/logs.db
+/data/logs.db-wal
+/data/logs.db-shm
+/data/library.json
+/data/preferences.json
+/data/playlists.json
+/data/demo-music/
+/data/evals/
+# 2026-09-09 补：进程内 Agent 会话库、电台库、记忆与学习词典 —— 都是运行时
+# 派生数据（与 eval.db / logs.db 同类），不该入库，否则每次跑评估都会脏工作区。
+/data/agent-sessions.db
+/data/agent-sessions.db-wal
+/data/agent-sessions.db-shm
+/data/radio.db
+/data/radio.db-wal
+/data/radio.db-shm
+/data/memory.json
+/data/lexicon-learned.json
+# 一次性验证脚本（*.tmp.mjs，用完即弃）
+/scripts/*.tmp.mjs
+
+# 2026-09-10 移除：agent/ 已不再是独立子项目（无 package.json / node_modules /
+# 独立 tsconfig，依赖收敛在根 package.json），上面五条 ignore 与其运行数据目录
+# agent/data/（flue 时代遗留）一并失效。根 .env 由上面已有的 `.env*` 规则覆盖。
+# pnpm 本地 store/cache（绕过 TRAE sandbox 全局缓存写入限制）
+/.local/
+
+# 评测报告（由版本 + run 派生，可随时重新生成）
+/reports/
+
+# IDE 生成文件
+/.trae/
+/.vscode/
+/.zcode/
+
+# 服务端日志（`next dev > dev.log` 之类会生成；现盘上已无此文件，保留规则防复发）
+dev.log
+
+# 文档改造前的原文备份（不要提交，备份在仓库外/外接存储更稳）
+/.workbuddy/backup/
+

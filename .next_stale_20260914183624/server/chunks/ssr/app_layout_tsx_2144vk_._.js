@@ -1,0 +1,3 @@
+module.exports=[33290,a=>{"use strict";var b=a.i(7997);a.s(["default",0,function({children:a}){return(0,b.jsxs)("html",{lang:"zh-CN",className:"h-full antialiased",children:[(0,b.jsxs)("head",{children:[(0,b.jsx)("link",{rel:"preconnect",href:"https://fonts.googleapis.com"}),(0,b.jsx)("link",{rel:"preconnect",href:"https://fonts.gstatic.com",crossOrigin:""}),(0,b.jsx)("link",{href:"https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@300;400;500;600;700&family=ZCOOL+XiaoWei&display=swap",rel:"stylesheet"})]}),(0,b.jsx)("body",{className:"min-h-full flex flex-col",children:a})]})},"metadata",0,{title:"Private Music Hub · 私人音乐平台",description:"只属于你的音乐空间 —— 收藏、播放、推荐与设备同步"}])},70864,a=>{a.n(a.i(33290))}];
+
+//# sourceMappingURL=app_layout_tsx_2144vk_._.js.map

@@ -1,0 +1,340 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────────────────────
+   设计系统 (Design Tokens) — meowra 风格「暗夜梦境」音乐空间
+   配色：深紫底 + 品牌粉(#ff7ab6) + 青(#88f3ff) + 紫(#8d6dd8)
+   背景完全可调：--bg / --bg-2 / --bg-glow-* 由 ThemeProvider 在运行时改写。
+   ────────────────────────────────────────────────────────────── */
+:root {
+  /* ⬇️ 可调背景（默认 = 夜紫，meowra 同款） */
+  --bg: #2a2140;
+  --bg-2: #140f24;
+  --bg-glow-1: #ff7ab6; /* 粉 */
+  --bg-glow-2: #6a5acd; /* 紫 */
+
+  /* 表面 / 文本（深色基调，玻璃半透明） */
+  --background: #1a1430;
+  --foreground: #f3e9ff;
+  --surface: rgba(44, 34, 66, 0.66);
+  --surface-2: rgba(30, 23, 48, 0.55);
+  --surface-3: rgba(64, 51, 94, 0.9);
+  --border: rgba(255, 255, 255, 0.1);
+  --muted: #b6a6d4;
+  --brand: #ff7ab6;
+  --brand-strong: #ff5fa3;
+  --brand-soft: rgba(255, 122, 182, 0.16);
+  --brand-2: #88f3ff; /* 青 */
+  --brand-3: #8d6dd8; /* 紫 */
+  --ring: #ff7ab6;
+}
+
+/* 浅色基调：由 ThemeProvider 通过 data-tone="light" 触发（晨雾 / 薄荷等预设） */
+:root[data-tone="light"] {
+  --background: #f4eef8;
+  --foreground: #2b1d2a;
+  --surface: rgba(255, 255, 255, 0.7);
+  --surface-2: rgba(255, 255, 255, 0.5);
+  --surface-3: rgba(255, 255, 255, 0.92);
+  --border: rgba(43, 29, 42, 0.12);
+  --muted: #7a6a86;
+  --brand: #ff5fa3;
+  --brand-strong: #ff3d92;
+  --brand-soft: rgba(255, 95, 163, 0.14);
+  --brand-2: #2f9fd0;
+  --brand-3: #7a4fd0;
+  --ring: #ff5fa3;
+  --bg-glow-1: #ff9ecb;
+  --bg-glow-2: #b9a6e6;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-2: var(--brand-2);
+  --color-brand-3: var(--brand-3);
+  --color-ring: var(--ring);
+  --font-sans: "M PLUS Rounded 1c", ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: "ZCOOL XiaoWei", "M PLUS Rounded 1c", serif;
+}
+
+body {
+  background: var(--bg);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ── 应用外壳：点状纹理 + 双色辉光 + 可调渐变背景，全部跟随 --bg* 变量 ── */
+.app-shell {
+  background-image:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cg fill='%23a897d8'%3E%3Ccircle cx='20' cy='20' r='2.5'/%3E%3Ccircle cx='60' cy='14' r='2.5'/%3E%3Ccircle cx='100' cy='24' r='2.5'/%3E%3Ccircle cx='36' cy='52' r='4'/%3E%3Ccircle cx='92' cy='90' r='2.5'/%3E%3Ccircle cx='118' cy='78' r='2.5'/%3E%3Ccircle cx='110' cy='112' r='4'/%3E%3C/g%3E%3C/svg%3E"),
+    radial-gradient(1100px 620px at 12% -10%, color-mix(in srgb, var(--bg-glow-1) 26%, transparent), transparent 60%),
+    radial-gradient(1000px 560px at 100% 0%, color-mix(in srgb, var(--bg-glow-2) 22%, transparent), transparent 55%),
+    linear-gradient(160deg, var(--bg) 0%, var(--bg-2) 100%);
+  background-size: 140px 140px, 1100px 620px, 1000px 560px, auto;
+  background-attachment: fixed;
+  transition: background-image 0.45s ease;
+}
+
+/* ── 自定义滚动条（粉色） ── */
+.scroll-area {
+  scrollbar-width: thin;
+  scrollbar-color: var(--brand) transparent;
+}
+.scroll-area::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scroll-area::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--brand) 55%, transparent);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll-area::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--brand) 70%, transparent);
+  background-clip: content-box;
+}
+.scroll-area::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── 歌词滚动区：上下渐隐，把视线收拢到当前行 ──
+   mask-image 只做 alpha 渐变，与明暗主题无关，无需为双主题各写一份。
+   渐隐高度 14% 是折中：太大会吃掉首末行，太小则失去聚焦感。 */
+.lyric-scroll {
+  --lyric-fade: 14%;
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--lyric-fade),
+    #000 calc(100% - var(--lyric-fade)),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--lyric-fade),
+    #000 calc(100% - var(--lyric-fade)),
+    transparent 100%
+  );
+  /* mask 会连带裁掉滚动条，改让滚动条始终可见以便感知长度 */
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--brand) 45%, transparent) transparent;
+}
+
+/* ── 玻璃拟态（header / 抽屉 / 卡片） ── */
+.glass {
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  backdrop-filter: saturate(150%) blur(16px);
+  -webkit-backdrop-filter: saturate(150%) blur(16px);
+}
+
+/* ── 卡片 ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1.25rem;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 10px 30px -12px rgba(0, 0, 0, 0.45);
+}
+
+/* 浅色基调下把重投影换成轻柔投影，避免白卡上出现脏灰晕 */
+:root[data-tone="light"] .card {
+  box-shadow: 0 8px 24px -14px rgba(43, 29, 42, 0.25);
+}
+
+/* ── 可拉伸布局：面板与列的空间分配 ──
+   窄屏（< lg）：单列纵向铺开，面板按内容自然高度，最小 240px 保证可点可用；
+   分隔条此时没有意义，由组件自己 hidden 掉。
+   宽屏（≥ lg）：进入「两列 + 面板」模式，列与面板都改成 flex 权重分配——
+   flex-basis:0 让权重完全决定大小（分隔条拖多少就是多少），
+   而不是「内容高度 + 剩余空间再分配」，否则拖动反馈会迟钝且不均匀。
+   min-height 是保险丝：任何面板都不会被拖到完全看不见。 */
+.pane-item {
+  flex: 0 1 auto;
+  /* 320px = 「正在播放」完整展开所需高度（封面 + 进度 + 控制 + 模式胶囊），
+     以此为下限，窄屏下没有任何卡片需要内滚才能看全。 */
+  min-height: 320px;
+}
+.layout-col {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+@media (min-width: 1024px) {
+  .pane-item {
+    /* 高度 = 列填充比例(colFill) × flex 权重占比，由 JS 算进 --pane-h。
+       不再用 flex-grow 拉伸铺满：最后一张卡的底部把手把整列内容缩小
+       （colFill < 1）时，列下方留白，单卡的列也依然可以随意调高度。 */
+    flex: 0 0 var(--pane-h, auto);
+    min-height: 150px;
+  }
+  .layout-col {
+    flex-shrink: 1;
+    flex-basis: 0;
+    min-width: 0;
+    min-height: 0;
+  }
+  .layout-col--left {
+    flex-grow: var(--col-left, 0.62);
+  }
+  .layout-col--right {
+    flex-grow: calc(1 - var(--col-left, 0.62));
+  }
+}
+
+/* ── A/D 选中的卡片：外溢的淡色光晕（明暗主题都走 --brand* 变量） ── */
+.pane-focused {
+  outline: 1px solid color-mix(in srgb, var(--brand) 55%, transparent);
+  outline-offset: 0;
+  box-shadow:
+    0 0 0 5px var(--brand-soft),
+    0 0 32px 2px color-mix(in srgb, var(--brand) 28%, transparent);
+}
+
+/* ── 品牌渐变文字（logo / 标题强调） ── */
+.text-brand-gradient {
+  background: linear-gradient(120deg, var(--brand) 0%, var(--brand-2) 120%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ── 渐变下划线（聚焦 / 悬停强调，呼应 meowra） ── */
+.grad-underline {
+  position: relative;
+}
+.grad-underline::after {
+  content: "";
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  bottom: -2px;
+  height: 2px;
+  border-radius: 9999px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--brand) 80%, transparent), color-mix(in srgb, var(--brand-2) 70%, transparent));
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.25s ease;
+}
+.grad-underline:hover::after,
+.grad-underline:focus-visible::after {
+  transform: scaleX(1);
+}
+
+/* ── 统一焦点环（可访问性） ── */
+:where(button, a, textarea, input, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 0.6rem;
+}
+
+/* ── 通用按压反馈（呼应 meowra 的悬浮上移 + 粉色光晕） ── */
+.lift {
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    background-color 0.18s ease;
+}
+.lift:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 28%, transparent);
+}
+
+/* ── APlayer 主题微调：贴合品牌粉与圆角，融入页脚 ── */
+.aplayer {
+  border-radius: 0.875rem !important;
+  border: 1px solid var(--border) !important;
+  background: var(--surface-2) !important;
+  box-shadow: none !important;
+  font-family: var(--font-sans) !important;
+  color: var(--foreground) !important;
+}
+.aplayer .aplayer-info {
+  border-bottom: none !important;
+}
+.aplayer .aplayer-author,
+.aplayer .aplayer-title {
+  color: var(--foreground) !important;
+}
+.aplayer .aplayer-played {
+  background: var(--brand) !important;
+}
+.aplayer .aplayer-thumb {
+  background: var(--brand) !important;
+  border-color: var(--brand) !important;
+}
+.aplayer .aplayer-icon-play,
+.aplayer .aplayer-icon-pause,
+.aplayer .aplayer-icon-back,
+.aplayer .aplayer-icon-forward {
+  fill: var(--brand) !important;
+}
+.aplayer .aplayer-volume-bar-wrap .aplayer-volume-bar .aplayer-volume {
+  background: var(--brand) !important;
+}
+.aplayer .aplayer-list li.aplayer-list-light {
+  background: var(--brand-soft) !important;
+}
+.aplayer .aplayer-list li:hover {
+  background: color-mix(in srgb, var(--brand) 12%, transparent) !important;
+}
+
+/* ── 进场动画 ── */
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-up {
+  animation: fade-up 0.3s ease-out both;
+}
+
+/* 均衡器小动画（播放中曲目指示） */
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.4);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/* 骨架微光（加载占位） */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+/* ── 尊重「减少动态效果」偏好 ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
