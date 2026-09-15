@@ -10,6 +10,7 @@
  * 结构：Layout 是「两列，每列若干个 Pane，每个 Pane 内若干张卡片（Tab）」。
  * 尺寸一律用相对 flex 值（不存像素），这样窗口缩放、跨设备读取都不会错位。
  */
+import { LS_KEYS } from './storage-keys';
 
 export type CardId = 'chat' | 'lyrics' | 'nowplaying' | 'queue';
 
@@ -48,7 +49,8 @@ export type Layout = {
 	hidden: CardId[];
 };
 
-const STORAGE_KEY = 'music-panel-layout';
+/** 存储键带项目命名空间（见 storage-keys.ts）：与 song 同源，同名键会互相覆盖。 */
+const STORAGE_KEY = LS_KEYS.layout;
 
 /**
  * 默认布局：左列 = 音乐助手 / 歌词，右列 = 正在播放 / 播放队列。
@@ -83,8 +85,8 @@ function nextPaneId(): string {
 /**
  * 结构校验 + 修复：localStorage 可能被手改、来自旧版本，或由历史 bug 写出
  * （如旧版 mergeInto 曾留下「active 指向已摘走卡片」的悬空引用）。
- * 能修复的一律修复（激活位悬空、卡片重复、空面板、面板 id 冲突），
- * 只有结构性损坏（列数不对、非法卡片 id）才回退默认值——
+ * 能修复的一律修复（激活位悬空、卡片重复、空面板、面板 id 冲突、不认识的卡片），
+ * 只有结构性损坏（列数不对、某列变空）才回退默认值——
  * 直接整体回退会把用户精心调好的布局一次清空。
  */
 function sanitizeLayout(value: unknown): Layout | null {
@@ -113,10 +115,13 @@ function sanitizeLayout(value: unknown): Layout | null {
 			if (!rawPane || typeof rawPane !== 'object') return null;
 			const p = rawPane as Partial<Pane>;
 			if (!Array.isArray(p.cards) || typeof p.flex !== 'number' || !(p.flex > 0)) return null;
-			// 卡片唯一性兜底：重复出现的卡片只保留第一份
+			// 卡片唯一性兜底：重复出现的卡片只保留第一份；
+			// 不认识的卡片只丢弃它自己，**不整体回退**——数据可能来自另一个项目
+			// 或旧版本（实测 song 的布局含本项目没有的 overview 卡）。
+			// 整体回退会把用户精心调好的布局一次清空，代价远大于少一张卡。
 			const cards: CardId[] = [];
 			for (const c of p.cards) {
-				if (!ALL_CARD_IDS.includes(c)) return null;
+				if (!ALL_CARD_IDS.includes(c)) continue;
 				if (seenCards.has(c)) continue;
 				seenCards.add(c);
 				cards.push(c);
@@ -141,6 +146,10 @@ function sanitizeLayout(value: unknown): Layout | null {
 		}
 		if (columns[colIdx].length > 0 && orphanFlex > 0) columns[colIdx][0].flex += orphanFlex;
 	}
+
+	// 兜底：丢卡后若某列空了，布局就没有任何可渲染对象（调用方按两列渲染，
+	// 空列会渲染成一个没有内容的框），只有这种情况才回退默认。
+	if (columns[0].length === 0 || columns[1].length === 0) return null;
 
 	const hidden = v.hidden.filter(
 		(c): c is CardId => ALL_CARD_IDS.includes(c) && !seenCards.has(c),

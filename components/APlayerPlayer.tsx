@@ -29,6 +29,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { PlayerSnapshot, QueueItem } from '@/contract/player';
 import { usePlayerSnapshot } from './PlayerProvider';
 import { loadMode, loadShuffle, loadVolume, PLAYER_EVENTS } from './player-events';
+import { LS_KEYS } from './storage-keys';
 
 const AP_CDN_JS = 'https://unpkg.com/aplayer@1.10.1/dist/APlayer.min.js';
 const AP_CDN_CSS = 'https://unpkg.com/aplayer@1.10.1/dist/APlayer.min.css';
@@ -51,7 +52,8 @@ type APlayerInstance = {
 };
 type APlayerConstructor = new (options: Record<string, unknown>) => APlayerInstance;
 
-const RESUME_KEY_PREFIX = 'music-resume:';
+/** 带项目命名空间的续播键前缀（见 storage-keys.ts）。 */
+const RESUME_KEY_PREFIX = LS_KEYS.resumePrefix;
 const RESUME_THROTTLE_MS = 2000;
 
 /** 切歌后抑制旧曲目残留进度的时间窗口（毫秒）。 */

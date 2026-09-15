@@ -17,12 +17,39 @@ import {
 	defaultLayout,
 	ensureVisible,
 	hideCard,
+	loadLayout,
 	mergeInto,
 	setActiveCard,
 	splitOut,
 	type CardId,
 	type Layout,
 } from './panel-layout';
+import { LS_KEYS } from './storage-keys';
+
+/**
+ * 装上假的 window.localStorage 跑 loadLayout()。
+ *
+ * sanitizeLayout 是模块私有的，只有从这里进去才能覆盖「读到一份外来的
+ * 布局数据会怎样」——而这正是本项目踩过的坑（同源下读到 song 的布局）。
+ */
+function loadWithStored(raw: unknown): Layout {
+	const store = new Map<string, string>();
+	if (raw !== undefined) store.set(LS_KEYS.layout, JSON.stringify(raw));
+	const g = globalThis as { window?: unknown };
+	const prev = g.window;
+	g.window = {
+		localStorage: {
+			getItem: (k: string) => store.get(k) ?? null,
+			setItem: () => {},
+			removeItem: () => {},
+		},
+	};
+	try {
+		return loadLayout();
+	} finally {
+		g.window = prev;
+	}
+}
 
 /** 布局里出现过的全部卡片（含重复），按出现顺序。 */
 function allCards(layout: Layout): CardId[] {
@@ -105,4 +132,80 @@ test('hideCard：摘走卡片后不留空面板（否则会渲染出一个没有
 		for (const pane of col) assert.ok(pane.cards.length > 0, `${pane.id} 是空面板`);
 	}
 	assert.ok(!allCards(l).includes('nowplaying'));
+});
+
+/**
+ * 外来布局数据（另一个项目 / 旧版本写的）里的未知卡片：
+ * 只丢弃那一张，**不整体回退**——整体回退会把用户调好的布局一次清空。
+ */
+test('未知卡片：只丢那一张，其余布局原样保留', () => {
+	// song 的布局形状：含本项目不认识的 overview 卡。
+	// colFlex 特意用 0.7（默认是 0.58），以便断言「确实没有回退默认」。
+	const l = loadWithStored({
+		columns: [
+			[
+				{ id: 'pane-overview', cards: ['overview', 'chat'], active: 'overview', flex: 1.5 },
+				{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.5 },
+			],
+			[
+				{ id: 'pane-nowplaying', cards: ['nowplaying'], active: 'nowplaying', flex: 1.25 },
+				{ id: 'pane-queue', cards: ['queue'], active: 'queue', flex: 1.25 },
+			],
+		],
+		colFlex: 0.7,
+		colFill: [0.6, 1],
+		hidden: [],
+	});
+
+	assert.equal(l.colFlex, 0.7, '不应整体回退默认');
+	assert.deepEqual(l.colFill, [0.6, 1], '不应整体回退默认');
+	assert.deepEqual(allCards(l).sort(), [...ALL_CARD_IDS].sort(), '本项目的卡片一张都不能少');
+	assert.ok(!(allCards(l) as string[]).includes('overview'), '未知卡片应被丢弃');
+	// 幸存的 pane 保留，激活位回退到剩余卡片（原本指向 overview）
+	const pane = l.columns[0].find((p) => p.id === 'pane-overview');
+	assert.deepEqual(pane?.cards, ['chat']);
+	assert.equal(pane?.active, 'chat');
+});
+
+test('未知卡片：把某列清空时才回退默认（空列会渲染成空框）', () => {
+	const l = loadWithStored({
+		columns: [
+			[{ id: 'pane-overview', cards: ['overview'], active: 'overview', flex: 1 }],
+			[{ id: 'pane-queue', cards: ['queue'], active: 'queue', flex: 1 }],
+		],
+		colFlex: 0.7,
+		colFill: [1, 1],
+		hidden: [],
+	});
+	assert.deepEqual(l, defaultLayout());
+});
+
+test('未知卡片：hidden 里的未知 id 被过滤掉', () => {
+	const l = loadWithStored({
+		columns: defaultLayout().columns,
+		colFlex: 0.58,
+		colFill: [1, 1],
+		hidden: ['overview', 'queue'],
+	});
+	// overview 不认识 → 过滤；queue 已在布局里 → 也不算隐藏
+	assert.deepEqual(l.hidden, []);
+});
+
+test('重复卡片：只保留第一份，不整体回退', () => {
+	const l = loadWithStored({
+		columns: [
+			[{ id: 'p1', cards: ['chat', 'chat'], active: 'chat', flex: 1 }],
+			[{ id: 'p2', cards: ['chat', 'queue'], active: 'chat', flex: 1 }],
+		],
+		colFlex: 0.58,
+		colFill: [1, 1],
+		hidden: [],
+	});
+	assert.equal(allCards(l).filter((c) => c === 'chat').length, 1);
+	assert.ok(allCards(l).includes('queue'));
+});
+
+test('结构性损坏：列数不对 → 回退默认', () => {
+	const l = loadWithStored({ columns: [[]], colFlex: 0.58, colFill: [1, 1], hidden: [] });
+	assert.deepEqual(l, defaultLayout());
 });

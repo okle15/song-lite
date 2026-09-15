@@ -13,7 +13,10 @@
  *                                          （GlobalHotkeys 的 F 键派发，LyricsPanel 监听）
  *
  * 本地偏好存 localStorage（音量 / 播放模式 / 随机 / 收藏），APlayerPlayer 初始化时读取。
+ * 键名统一取自 storage-keys（带项目命名空间，避免与 song 互相覆盖）。
  */
+import { LS_KEYS } from './storage-keys';
+
 export const PLAYER_EVENTS = {
 	time: 'player-time',
 	duration: 'player-duration',
@@ -44,11 +47,12 @@ export const PLAYBACK_MODES: PlaybackModeSpec[] = [
 	{ value: 'one', label: 'ONE', zh: '单曲', icon: 'OneLoopIcon' },
 ];
 
+/** 本模块用到的存储键；值统一来自 storage-keys。 */
 const KEYS = {
-	volume: 'music-volume',
-	favorites: 'music-favorites',
-	mode: 'music-playback-mode',
-	shuffle: 'music-playback-shuffle',
+	volume: LS_KEYS.volume,
+	favorites: LS_KEYS.favorites,
+	mode: LS_KEYS.mode,
+	shuffle: LS_KEYS.shuffle,
 } as const;
 
 /** 秒 → m:ss。 */

@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
+import { LS_KEYS } from './storage-keys';
 
 export type Tone = 'dark' | 'light';
 
@@ -37,7 +38,8 @@ export const THEME_PRESETS: ThemePreset[] = [
   { id: 'mint', name: '薄荷', tone: 'light', bg: '#eaf3ef', bg2: '#d7e9e0', glow1: '#6ed6c2', glow2: '#8d6dd8' },
 ];
 
-const STORAGE_KEY = 'song-theme-v1';
+/** 存储键带项目命名空间（见 storage-keys.ts）：与 song 同源，同名键会互相覆盖。 */
+const STORAGE_KEY = LS_KEYS.theme;
 
 export type ThemeState =
   | { kind: 'preset'; id: string }
