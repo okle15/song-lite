@@ -28,18 +28,28 @@ npm run build && npm start -- -p 3100
 单曲循环 / 随机）、歌词（含全屏沉浸页）、音量 / 静音、背景主题、可拖拽可合并的多面板布局、
 全局快捷键、播放历史落库。
 
-**没有**（曾有过，2026-09-15 随最简化删除）：电台、偏好设置、AI 对话、语音输入、
+**没有**（曾有过，2026-09-15 随最简化删除）：电台、偏好设置、语音输入、
 MV 视频播放、统计概览、LLM 打标。要恢复它们，看 git 历史（`RADIO.md` 一并删除）。
+
+**Agent**：对话是布局系统里的一张普通卡（`chat`，⌘K 唤起），协议交给 Vercel AI SDK
+（`/api/agent`）。当前有 5 个播放工具 + **会话历史**（跨刷新保留，发送前裁掉历史轮的
+工具轨迹）。记忆 / 观测 / 触发器未做——加什么、加在哪、凭什么这么判断，全在
+[BLUEPRINT.md](./BLUEPRINT.md)。
 
 ---
 
 ## 目录结构
 
 ```
-app/            只放路由。页面外壳在 page.tsx，其余全是 app/api/**/route.ts
+app/            路由 + 页面外壳
+  page.tsx        服务端外壳（无 'use client'）：读一次对话历史，当 props 递下去
+  home-client.tsx 浏览器主体（'use client'）—— 其余前端代码都在这里
+  api/**/route.ts 全部 HTTP 端点
 components/     浏览器侧（不设 lib/ 子目录）。纯函数模块的单测就近放
 contract/       前后端共享契约，零业务依赖（player.ts 是 SSE 的 wire 类型）
+agent/          Agent 本体：provider / run / tools / prompt（构成见 BLUEPRINT.md §2）
 server/         业务实现。根只留 http.ts（信封）与 db.ts（连接）
+  agent/        对话历史读写（message-log.ts）
   library/      曲库：扫描 / 搜索 / 目录解析
   player/       播放状态机 / 音频流 / 响应体
   records/      播放历史读写
@@ -49,7 +59,7 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 
 ---
 
-## API 一览（10 个）
+## API 一览（11 个）
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
@@ -62,6 +72,7 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 | POST | `/api/player/next` | 下一首；到队尾返回 `stopped` |
 | POST | `/api/player/jump` | `{index}` 跳到队列第 index 首 |
 | GET | `/api/history?limit=` | 播放历史，时间倒序（默认 20，上限 200） |
+| POST | `/api/agent` | **对话端点**（SSE）。body `{messages, snapshot}`；协议是 AI SDK 的 UI 消息流（响应头 `x-vercel-ai-ui-message-stream: v1`），收尾是**裸** `data: [DONE]` |
 
 **统一信封**：所有 JSON 路由返回 `{ code, data?, message }`。
 `code === 0` 表示成功（**不是 200**），失败时 `code` 等于 HTTP status。
@@ -75,14 +86,18 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 进程内 memo。真相永远在文件系统上，再存一份到 SQLite 只会引入
 「表里的行和盘上的文件对不上」这类问题。
 
-**数据库只存扫描不出来的东西** —— 目前只有播放历史：
+**数据库只存扫描不出来的东西** —— 播放历史与对话历史：
 
 ```
 data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
   plays(id, track_id, title, artist, started_at)
+  messages(id, role, parts, created_at)   -- 对话历史；id = 前端消息 id，upsert 天然幂等
 ```
 
 - 建表语句**只在 `server/db.ts`** 出现。加表就往 `migrate()` 里追加一条。
+- `messages` 存的是消息 **parts 全文（含工具轨迹）**，因为刷新页面时轨迹卡片要能原样恢复；
+  而送给模型的上下文由 `agent/run.ts` 在**发送前**裁剪（`pruneMessages`）。存储存全量、
+  发送才裁剪，两个目标才能同时成立——合成一步必然牺牲一个。
 - 写入时机：`/api/player/{play,next,jump}` **成功切歌**时记一行（`pause`/`resume` 不算新播放）。
 - 刻意**不开 WAL**：默认 journal 模式下落盘只有单个 `.db`，不留 `-wal` / `-shm` 尾巴，
   「删一个文件就干净」。
@@ -112,4 +127,5 @@ BASE=http://127.0.0.1:3100 npm run smoke:api   # 接口冒烟（需先起服务�
 
 | 文档 | 何时读 |
 |:---|:---|
+| [BLUEPRINT.md](./BLUEPRINT.md) | 动 Agent 之前必读：十个部件在哪、需求往哪个部件下手、选型判据、错题本、路线图 |
 | [AGENTS.md](./AGENTS.md) | 改代码前必读：协作红线、验证与调试、目录约定 |
