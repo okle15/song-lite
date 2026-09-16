@@ -13,8 +13,9 @@
  * `.gitignore` 已忽略。刻意**不开 WAL**：默认 journal 模式下落盘只有单个
  * `.db` 文件，不留 `-wal` / `-shm` 尾巴——「删一个文件就干净」是有意保留的性质。
  *
- * ── 表结构（2026-09-15 重设，从最简起步）─────────────────────────────
- *   plays   播放历史，一行 = 一次「开始播放某首歌」
+ * ── 表结构（2026-09-16 加 messages，见 BLUEPRINT 阶段 3）───────────────
+ *   plays     播放历史，一行 = 一次「开始播放某首歌」
+ *   messages  对话历史，一行 = 一条 UI 消息（user 或 assistant）
  *
  * 之后要加表（偏好 / 歌单 / 标签 / 电台编排…）就往 `migrate()` 里追加一条
  * `CREATE TABLE IF NOT EXISTS`。**建表语句只在本文件出现**——一旦别处也写一份，
@@ -48,6 +49,13 @@ function migrate(db: DatabaseSync): void {
 			title      TEXT NOT NULL,
 			artist     TEXT NOT NULL,
 			started_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS messages (
+			id         TEXT PRIMARY KEY,
+			role       TEXT NOT NULL,
+			parts      TEXT NOT NULL,
+			created_at TEXT NOT NULL
 		);
 	`);
 }
