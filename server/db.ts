@@ -13,11 +13,17 @@
  * `.gitignore` 已忽略。刻意**不开 WAL**：默认 journal 模式下落盘只有单个
  * `.db` 文件，不留 `-wal` / `-shm` 尾巴——「删一个文件就干净」是有意保留的性质。
  *
- * ── 表结构（2026-09-16 加 messages，见 BLUEPRINT 阶段 3）───────────────
- *   plays     播放历史，一行 = 一次「开始播放某首歌」
- *   messages  对话历史，一行 = 一条 UI 消息（user 或 assistant）
+ * ── 表结构（2026-09-16 加 messages / preferences，见 BLUEPRINT 阶段 3）────
+ *   plays        播放历史，一行 = 一次「开始播放某首歌」
+ *   messages     对话历史，一行 = 一条 UI 消息（user 或 assistant）
+ *   preferences  ⑥ 记忆，一行 = 一条关于用户的持久偏好（key 唯一，再记即覆盖）
  *
- * 之后要加表（偏好 / 歌单 / 标签 / 电台编排…）就往 `migrate()` 里追加一条
+ * 三张表的**失败语义不同**，不是不一致而是有意：
+ *   plays / messages 是旁路记录，写失败只 log 不抛（不该打断播放或对话）；
+ *   preferences 是 agent 对用户的**承诺**（它说了「记住了」就该真记住），
+ *   所以写失败要抛到路由 → 变成工具失败 → 模型据实告诉用户。
+ *
+ * 之后要加表（歌单 / 标签 / 电台编排…）就往 `migrate()` 里追加一条
  * `CREATE TABLE IF NOT EXISTS`。**建表语句只在本文件出现**——一旦别处也写一份，
  * 两处必然漂移（历史上 `logs.db` 与 `eval.db` 的双份表定义就是这么来的）。
  */
@@ -56,6 +62,12 @@ function migrate(db: DatabaseSync): void {
 			role       TEXT NOT NULL,
 			parts      TEXT NOT NULL,
 			created_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS preferences (
+			key        TEXT PRIMARY KEY,
+			value      TEXT NOT NULL,
+			updated_at TEXT NOT NULL
 		);
 	`);
 }

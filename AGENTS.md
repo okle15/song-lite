@@ -35,11 +35,21 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
 ## 数据与持久化
 
 - **曲库不落库**：曲目来自对 `MUSIC_DIR` 的实时扫描（进程内 memo），真相在文件系统上。
-- **数据库只存扫描不出来的东西**：`plays`（播放历史）与 `messages`（对话历史）。
+- **数据库只存扫描不出来的东西**：`plays`（播放历史）、`messages`（对话历史）与
+  `preferences`（⑥ 记忆，一行 = 一条长期偏好）。
 - **`messages.id` 就是前端消息 id**，靠 `ON CONFLICT(id) DO UPDATE` 实现幂等；顺序锚在 `rowid`
   ——别用 `created_at` 排序（一轮的 user / assistant 会在同一毫秒落库，撞车）。
 - **`messages` 存 parts 全量（含工具轨迹），裁剪只发生在发送前**（`agent/run.ts` 的 `pruneMessages`）。
   存全量是为了刷新后轨迹卡片能原样恢复，发送前裁是为了上下文干净——合成一步必然牺牲一个。
+- **`preferences` 用 `key` 唯一性定义「什么算同一条偏好」**：同 key 覆盖，不追加（否则用户说五遍
+  「不喜欢摇滚」会记五条）。归一化规则（大小写 / 空格 / 连字符）在 `contract/preference.ts`，
+  **工具侧与存储侧共用同一份**，不许另写一份。
+- **三张表的失败语义不同，且是有意的**：`plays` / `messages` 是**流水**，写失败只记日志（不该打断
+  播放或对话）；`preferences` 是 agent 对用户的**承诺**（它已经说了「好，我记住了」），写失败必须
+  抛到路由 → 变成工具失败 → 模型据实告知。**加新表时先问一句：它失败时，谁需要知道？**
+- **偏好注入只读最近 30 条**（`MAX_INJECTED_PREFERENCES`），不删任何行；**不做自动过期**——
+  时效语义（「最近别放摇滚」）交给 `value` 的自然语言承载。加一个 `expires_at` 却不写任何检查
+  它的代码，只会让人以为系统在做过期判断。
 - **建表语句只在 `server/db.ts` 出现**。加表就往 `migrate()` 里追加 `CREATE TABLE IF NOT EXISTS`。
   一旦别处也写一份，两处必然漂移（历史上 `logs.db` 与 `eval.db` 的双份表定义就是这么来的）。
 - **写入时机是「成功切歌」**：`/api/player/{play,next,jump}`。`pause`/`resume` 不记，

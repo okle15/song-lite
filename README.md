@@ -32,8 +32,9 @@ npm run build && npm start -- -p 3100
 MV 视频播放、统计概览、LLM 打标。要恢复它们，看 git 历史（`RADIO.md` 一并删除）。
 
 **Agent**：对话是布局系统里的一张普通卡（`chat`，⌘K 唤起），协议交给 Vercel AI SDK
-（`/api/agent`）。当前有 5 个播放工具 + **会话历史**（跨刷新保留，发送前裁掉历史轮的
-工具轨迹）。记忆 / 观测 / 触发器未做——加什么、加在哪、凭什么这么判断，全在
+（`/api/agent`）。当前有 **7 个工具**（5 个播放 + 2 个记忆）、**会话历史**（跨刷新保留，
+发送前裁掉历史轮的工具轨迹）与**记忆**（`remember` / `forget_preference` 记下的长期偏好
+跨对话注入系统提示词）。观测 / 触发器未做——加什么、加在哪、凭什么这么判断，全在
 [BLUEPRINT.md](./BLUEPRINT.md)。
 
 ---
@@ -49,7 +50,7 @@ components/     浏览器侧（不设 lib/ 子目录）。纯函数模块的单�
 contract/       前后端共享契约，零业务依赖（player.ts 是 SSE 的 wire 类型）
 agent/          Agent 本体：provider / run / tools / prompt（构成见 BLUEPRINT.md §2）
 server/         业务实现。根只留 http.ts（信封）与 db.ts（连接）
-  agent/        对话历史读写（message-log.ts）
+  agent/        对话历史（message-log.ts）与偏好记忆（preference-log.ts）的读写
   library/      曲库：扫描 / 搜索 / 目录解析
   player/       播放状态机 / 音频流 / 响应体
   records/      播放历史读写
@@ -59,7 +60,7 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 
 ---
 
-## API 一览（11 个）
+## API 一览（12 个）
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
@@ -72,6 +73,7 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 | POST | `/api/player/next` | 下一首；到队尾返回 `stopped` |
 | POST | `/api/player/jump` | `{index}` 跳到队列第 index 首 |
 | GET | `/api/history?limit=` | 播放历史，时间倒序（默认 20，上限 200） |
+| GET/POST/DELETE | `/api/preferences` | **偏好（Agent 的长期记忆）**。GET 列出；POST `{key, value}` 记住一条（同 key 覆盖）；DELETE `?key=` 忘掉一条。agent 的 `remember` / `forget_preference` 工具走的就是这里 |
 | POST | `/api/agent` | **对话端点**（SSE）。body `{messages, snapshot}`；协议是 AI SDK 的 UI 消息流（响应头 `x-vercel-ai-ui-message-stream: v1`），收尾是**裸** `data: [DONE]` |
 
 **统一信封**：所有 JSON 路由返回 `{ code, data?, message }`。
@@ -86,18 +88,25 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 进程内 memo。真相永远在文件系统上，再存一份到 SQLite 只会引入
 「表里的行和盘上的文件对不上」这类问题。
 
-**数据库只存扫描不出来的东西** —— 播放历史与对话历史：
+**数据库只存扫描不出来的东西** —— 播放历史、对话历史与偏好：
 
 ```
 data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
   plays(id, track_id, title, artist, started_at)
-  messages(id, role, parts, created_at)   -- 对话历史；id = 前端消息 id，upsert 天然幂等
+  messages(id, role, parts, created_at)      -- 对话历史；id = 前端消息 id，upsert 天然幂等
+  preferences(key, value, updated_at)        -- Agent 的长期记忆；key 唯一 = 同一条偏好
 ```
 
 - 建表语句**只在 `server/db.ts`** 出现。加表就往 `migrate()` 里追加一条。
+- 三张表的**失败语义不同，且是有意的**：`plays` / `messages` 是流水，写失败只记日志
+  （不该打断播放或对话）；`preferences` 是 agent 对用户的**承诺**（它说了「记住了」），
+  写失败必须让模型知道——否则用户下次发现它又忘了，却找不到任何线索。
 - `messages` 存的是消息 **parts 全文（含工具轨迹）**，因为刷新页面时轨迹卡片要能原样恢复；
   而送给模型的上下文由 `agent/run.ts` 在**发送前**裁剪（`pruneMessages`）。存储存全量、
   发送才裁剪，两个目标才能同时成立——合成一步必然牺牲一个。
+- `preferences` 的 `key` 是「什么算同一条偏好」的载体（`contract/preference.ts` 的
+  `normalizePreferenceKey` 统一归一化），所以用户说五遍「不喜欢摇滚」只会有一条。
+  注入时取最近更新的 30 条，全量塞进系统提示词——不做向量检索。
 - 写入时机：`/api/player/{play,next,jump}` **成功切歌**时记一行（`pause`/`resume` 不算新播放）。
 - 刻意**不开 WAL**：默认 journal 模式下落盘只有单个 `.db`，不留 `-wal` / `-shm` 尾巴，
   「删一个文件就干净」。

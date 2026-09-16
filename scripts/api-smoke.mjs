@@ -89,6 +89,37 @@ const CASES = [
 		expect: 'ok',
 		assert: (j) => (Array.isArray(j.data?.plays) && j.data.plays.length > 0 ? null : '播放后播放历史仍为空'),
 	},
+
+	// ── ⑥ 记忆（写 → 读回 → 删，三步按顺序跑；探针 key 在循环外兜底清理）──
+	// 为什么要按顺序写三条用例：单条只能验「接口通不通」，而偏好真正会坏的地方是
+	// **往返一致性**——写进去的 key 归一化后能不能被读回来、删的时候认不认得它。
+	{
+		id: 'preferences(POST)',
+		method: 'POST',
+		path: '/api/preferences',
+		body: { key: 'Smoke Probe', value: '冒烟探针' },
+		expect: 'ok',
+		// 故意写一个带空格与大写的 key：路由必须把它归一化成 smoke_probe 再回传，
+		// 否则「同一条偏好」的判等就失效了（用户说两遍会记两条）。
+		assert: (j) =>
+			j.data?.preference?.key === 'smoke_probe'
+				? null
+				: `key 未归一化：拿到 ${JSON.stringify(j.data?.preference?.key)}`,
+	},
+	{
+		id: 'preferences(GET)',
+		path: '/api/preferences',
+		expect: 'ok',
+		assert: (j) =>
+			j.data?.preferences?.some((p) => p.key === 'smoke_probe') ? null : '写入后读不回来',
+	},
+	{
+		id: 'preferences(DELETE)',
+		method: 'DELETE',
+		path: '/api/preferences?key=smoke_probe',
+		expect: 'ok',
+		assert: (j) => (j.data?.removed === true ? null : '删除应返回 removed:true'),
+	},
 ];
 
 /**
@@ -145,6 +176,10 @@ for (const c of CASES) {
 	}
 	rows.push({ id: c.id, verdict, code, detail, note: c.note });
 }
+
+// 兜底清理：偏好用例写的是**真实库**（data/app.db）。即使上面那条 DELETE 失败，
+// 也不能把探针 key 留在用户的库里——它会出现在之后每一轮对话的系统提示词里。
+await call({ method: 'DELETE', path: '/api/preferences?key=smoke_probe' }).catch(() => {});
 
 const W = Math.max(...rows.map((r) => r.id.length));
 console.log(`\nAPI 冒烟测试  BASE=${BASE}\n${'─'.repeat(78)}`);

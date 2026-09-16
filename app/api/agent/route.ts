@@ -21,6 +21,7 @@ import { readAgentConfig } from '@/agent/provider';
 import { runAgent } from '@/agent/run';
 import type { PlayerSnapshot } from '@/contract/player';
 import { appendMessages } from '@/server/agent/message-log';
+import { listPreferences } from '@/server/agent/preference-log';
 import { fail } from '@/server/http';
 
 export const dynamic = 'force-dynamic'; // SSE 必须动态运行，禁止静态优化
@@ -65,6 +66,12 @@ export async function POST(request: Request) {
 	const { result, tools } = await runAgent(config, {
 		uiMessages,
 		snapshot: body.snapshot ?? null,
+		// ⑥ 记忆的**读侧**：每轮现读一遍偏好，注入系统提示词。
+		// 写侧不在这里——那是 `remember_preference` 工具 → `/api/preferences`，
+		// 因为「记不记、记什么」必须由模型自己判断（见 prompt.ts 的铁律 6）。
+		// 读与写因此是两条独立的路，各走各的通道，在下一轮才汇合：
+		// 这一轮写进去的偏好，下一轮才会出现在下面这次读取里。
+		preferences: listPreferences(),
 		baseUrl: new URL(request.url).origin,
 		signal: request.signal,
 	});

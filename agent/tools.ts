@@ -33,6 +33,7 @@
  */
 import { tool } from 'ai';
 import { z } from 'zod';
+import { normalizePreferenceKey, type Preference } from '../contract/preference';
 import type { ToolOutcome } from '../contract/tool';
 
 export type ToolRunContext = {
@@ -221,6 +222,81 @@ export function createTools(ctx: ToolRunContext) {
 					);
 					if (!r.ok) return { ok: false, text: `继续播放失败：${r.message}` };
 					return { ok: true, text: '已继续播放。' };
+				}),
+			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+		}),
+
+		/**
+		 * ⑥ 记忆的**写入口**。它和上面几个工具形态相同（都是打自家 BFF），
+		 * 但它改变的不是播放状态，而是**服务端对这个用户的认知**——
+		 * 所以它写下去的东西会在下一轮、以及以后每一次对话里出现在系统提示词里。
+		 *
+		 * `key` 在本地先过一遍 `normalizePreferenceKey`：这样模型拿回的是规范化后的
+		 * key，下次用同一个 key 才不会写成第二条（归一化规则与存储层共用，见 contract）。
+		 */
+		remember_preference: tool({
+			description:
+				'记住一条关于用户的持久偏好，跨对话长期生效，例如「不喜欢摇滚」「晚上只听轻音乐」。' +
+				'只在用户表达了**稳定的喜好或长期约束**时调用；一次性的要求（「放首歌」「大声点」「换一首」）不要记。' +
+				'当前已记住的偏好会列在系统提示词的【已知偏好】里，先看那里，不要重复记同一个意思。' +
+				'同一个 key 再记会覆盖旧值——用户改主意时用它覆盖，而不是新增。',
+			inputSchema: z.object({
+				key: z
+					.string()
+					.describe(
+						'这条偏好的标识，英文小写加下划线，如 disliked_genre、preferred_artist、no_music_at_night。同一个 key = 同一条偏好，会覆盖。',
+					),
+				value: z.string().describe('偏好内容，把用户的意思浓缩成一句，如「摇滚」或「睡前放轻音乐」。'),
+			}),
+			execute: ({ key, value }, { abortSignal }) =>
+				settled(async () => {
+					const normalized = normalizePreferenceKey(key);
+					if (!normalized) {
+						return {
+							ok: false,
+							text: 'key 不合法：只能用英文字母、数字、下划线（如 disliked_genre）。换一个 key 再试。',
+						};
+					}
+					const r = await callBff<{ preference: Preference }>(
+						ctx,
+						'/api/preferences',
+						{
+							method: 'POST',
+							headers: JSON_HEADERS,
+							body: JSON.stringify({ key: normalized, value }),
+						},
+						abortSignal,
+					);
+					if (!r.ok) return { ok: false, text: `记住失败：${r.message}` };
+					return { ok: true, text: `已记住：${value}（key=${normalized}）` };
+				}),
+			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+		}),
+
+		forget_preference: tool({
+			description:
+				'忘掉一条已记住的偏好。用户说「不用记了」「忘掉刚才那句」「这个不算」时调用。' +
+				'key 用【已知偏好】里列出的那个。',
+			inputSchema: z.object({
+				key: z.string().describe('要忘掉的那条偏好的 key（见系统提示词的【已知偏好】）。'),
+			}),
+			execute: ({ key }, { abortSignal }) =>
+				settled(async () => {
+					const normalized = normalizePreferenceKey(key);
+					if (!normalized) {
+						return { ok: false, text: 'key 不合法：只能用英文字母、数字、下划线。' };
+					}
+					const r = await callBff<{ removed: boolean }>(
+						ctx,
+						`/api/preferences?key=${encodeURIComponent(normalized)}`,
+						{ method: 'DELETE' },
+						abortSignal,
+					);
+					if (!r.ok) return { ok: false, text: `忘掉失败：${r.message}` };
+					return {
+						ok: true,
+						text: r.data?.removed ? `已忘掉「${normalized}」。` : `本来就没记过「${normalized}」。`,
+					};
 				}),
 			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
 		}),

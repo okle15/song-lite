@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "tsx --test \"agent/**/*.test.ts\" \"components/**/*.test.ts\" \"server/**/*.test.ts\"",
+    "test": "tsx --test \"agent/**/*.test.ts\" \"components/**/*.test.ts\" \"contract/**/*.test.ts\" \"server/**/*.test.ts\"",
     "smoke:api": "node scripts/api-smoke.mjs"
   },
   "dependencies": {

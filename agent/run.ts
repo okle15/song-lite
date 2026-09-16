@@ -25,6 +25,7 @@ import {
 	streamText,
 	type UIMessage,
 } from 'ai';
+import type { Preference } from '../contract/preference';
 import type { PlayerSnapshot } from '../contract/player';
 import { buildSystemPrompt } from './prompt';
 import { type AgentConfig, getModel } from './provider';
@@ -47,6 +48,12 @@ export type RunAgentOptions = {
 	uiMessages: UIMessage[];
 	/** 前端随消息带上来的播放状态，拼进系统提示词。 */
 	snapshot?: PlayerSnapshot | null;
+	/**
+	 * ⑥ 已知偏好（跨对话保留）。**由路由从存储层读好传进来**——agent 不 import
+	 * `server/`（依赖方向，见 AGENTS.md），所以它只「收到事实」，不负责取事实。
+	 * 写入走另一条路：`remember_preference` 工具 → BFF `/api/preferences`。
+	 */
+	preferences?: Preference[] | null;
 	/** 自家 BFF 的 origin（工具靠它回调 API）。 */
 	baseUrl: string;
 	/** 客户端断开时中断本轮（关页面 / 点停止）。 */
@@ -98,7 +105,9 @@ export async function runAgent(config: AgentConfig, opts: RunAgentOptions) {
 	const result = streamText({
 		model: getModel(config),
 		// ai@7 起 `system` 更名为 `instructions`（旧名仍可作废弃别名）。
-		instructions: buildSystemPrompt(opts.snapshot),
+		// ⑦ 的实时状态与 ⑥ 的已知偏好都拼在这里，**不进 messages**：它们是
+		// 「约束与事实」而不是对话，进历史会随历史一起落库、一起长大（见 prompt.ts）。
+		instructions: buildSystemPrompt(opts.snapshot, opts.preferences),
 		messages,
 		tools,
 		stopWhen: isStepCount(MAX_STEPS),

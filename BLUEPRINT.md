@@ -52,7 +52,7 @@
 | ③ | **工具** | 模型能做的每一件事，一个工具一件 | `agent/tools.ts` | 🟢 活跃 |
 | ④ | **提示词** | 行为约束：做不到什么、不许写什么 | `agent/prompt.ts` | 🟢 活跃 |
 | ⑤ | **会话历史** | 刚才聊了什么（每轮读回重发） | `server/agent/message-log.ts`（存 + 读回）+ `agent/run.ts`（转成模型消息并裁剪） | 🟢 活跃 |
-| ⑥ | **记忆** | 关于你的持久事实（跨会话） | 待建 | 🟢 活跃 |
+| ⑥ | **记忆** | 关于你的持久事实（跨会话） | 四件套：`contract/preference.ts`（key 归一化）+ `server/agent/preference-log.ts`（存与读）+ `agent/tools.ts` 的 `remember/forget_preference`（**写**）+ `agent/prompt.ts` 的 `preferenceLines`（**注入**） | 🟢 活跃 |
 | ⑦ | **上下文装配** | 每轮把"此刻的事实"拼进请求 | `agent/prompt.ts` 的 `stateLines`（数据仍由前端随消息上报） | 🟢 活跃 |
 | ⑨ | **观测** | 知道它哪次答错、慢在哪、花了多少 | 待建 | 🟢 活跃 |
 | ⑩ | **触发器** | 不经 HTTP 直接唤醒它（定时/事件） | 待建 | 🟢 活跃 |
@@ -100,7 +100,7 @@
 | 3 | 模型接入 | 单一 OpenAI 兼容网关 | 够用。多模型路由（LiteLLM / OpenRouter）等有真实需求再加 |
 | 4 | 工具机制 | **代码内注册**（`tool()` + zod） | 工具少（<20）时全量注册最简单。**先不上** MCP（无跨服务复用需求）、代码执行（工具多了再说） |
 | 5 | 状态存储 | **SQLite**（`node:sqlite`），表随需要长（现有 `plays` / `messages`） | 个人自用 + 开源自跑，零外部依赖。**注意**：`node:sqlite` 是较新的 API，将来要发布给他人用时需重新评估 |
-| 6 | 记忆策略 | 未定（倾向：SQLite 表 + 全量注入 prompt，**不上向量检索**） | 见 §8 阶段 3b。个人偏好是「少量、长期、每条都短」（"不听摇滚"），几十条全塞进 system prompt 最简单也最可靠；向量检索是「偏好上万条」时才需要的解，现在做属于给自己找活干 |
+| 6 | 记忆策略 | **SQLite 表（`preferences`）+ 全量注入 prompt**；同 key 覆盖；只支持显式遗忘 | 个人偏好是「少量、长期、每条都短」（"不听摇滚"），几十条也就几百 token，全量塞进 system prompt 最简单也最可靠。**不上向量检索**——那是「偏好上万条」时才需要的解。**不做自动过期**：加一个 `expires_at` 却不写任何检查它的代码，只会让人以为系统在判断时效。时效语义交给 `value` 的自然语言承载 |
 | 7 | 前端交互 | **`useChat`**（`@ai-sdk/react`） | 协议解析一行不写。**否掉**：自绘 SSE + 自设帧协议（协议层是 ⑧，属于冻结区） |
 | 8 | 观测/评测 | 未定 | 见 §8 阶段 4 |
 
@@ -124,7 +124,9 @@ app/
 components/     浏览器侧（不 import server/）
 contract/       跨端共享的纯类型（零依赖）
 server/         业务逻辑
-  agent/message-log.ts  ⑤ 会话历史的读写（表结构在 server/db.ts）
+  agent/message-log.ts      ⑤ 会话历史的读写（表结构在 server/db.ts）
+  agent/preference-log.ts   ⑥ 记忆的读写（同址；key 归一化在 contract/preference.ts）
+app/api/        ⑧ 传输边界（路由 = HTTP 面；含 ⑥ 写侧用的 /api/preferences）
 data/           运行时数据（gitignore）
 ```
 
@@ -190,6 +192,8 @@ server/ ──► contract/
 | 状态"看起来还在" | `useChat` 放在卡片组件里，切一次标签页消息全没——没有报错，只是用户以为"它忘了" | 会话状态放在**不随卡片卸载**的层（例：`MainPanels`），卡片只接 props |
 | 响应消息没有 id | `toUIMessageStream` 只传 `originalMessages` 而**不传 `generateMessageId`** 时，SDK 实现里 `responseMessageId` 恒为 `undefined` → 落库主键成了空字符串 → **每轮 assistant 回复互相覆盖，库里只留得下最后一条**，不报任何错 | 两个必须一起传：`originalMessages`（开持久化模式）+ `generateMessageId`（给响应消息一个 id）。该 id 经流的 `start` 帧告诉浏览器，下一轮由浏览器原样回传，幂等才真正成立；最后一条是 assistant 时 SDK 会判为续写、复用同 id |
 | 首屏拿不到历史（"闪"或"永远错"） | 交给浏览器 mount 之后 fetch：先渲染空态、几百毫秒后历史才顶上来（一次可见的状态切换）；或者 server component 被静态化：历史定格在 `next build` 那一刻，之后永久不变 | 历史在**服务端读、当 props 递下去**；`app/page.tsx` 必须 `export const dynamic = 'force-dynamic'`（判据：`next build` 里该路由标 `ƒ` 而非 `○`） |
+| 承诺型写入被静默吞掉 | ⑥ 的写入若沿用「旁路记录」的失败语义（catch 住只 log），会出现最难查的一种状态：agent 已经对用户说了「好，我记住了」，而写入其实失败了——用户下次发现它又忘了，日志里也没有任何东西指向原因 | **按信息的性质定失败语义**，不按表的相似度定：流水（播放历史 / 对话历史）失败可以吞，**承诺**（记住了偏好）失败必须抛到路由 → 变成工具失败 → 模型据实告知。每加一张表都该重问一遍「它失败时，谁需要知道」 |
+| 「什么算同一条偏好」没有单一出处 | 归一化规则（大小写、空格、连字符）若在工具侧写一份、存储侧再写一份，`Disliked_Genre` 与 `disliked_genre` 会变成两条偏好：用户说两遍同一件事，提示词里出现两行，看起来还像"它在认真记" | 规则放 `contract/preference.ts`（`normalizePreferenceKey`），两侧共用；`preference.test.ts` 钉住「五种写法落到同一个 key」 |
 
 ---
 
@@ -202,7 +206,7 @@ server/ ──► contract/
 | **1b · 对话回到布局系统** ✅ | 右下角浮窗 → `chat` 卡片（可拉伸 / 合并 / 隐藏）；恢复顶栏入口与 ⌘K | 4 面板 5 分隔条；切标签页不丢消息；`ensureVisible` 有单测 |
 | **2 · 定"心意"** ⬜ | **先定下第一件非播放的事**（选歌 / 记口味 / 定时推送），再决定加哪些工具与 prompt | 一个需求 → 能准确说出"动 §3 的哪一行" |
 | **3a · 会话历史（⑤）** ✅ | 历史从浏览器搬到服务端：`messages` 表 + `onEnd` 落库 + 每轮读回、重发前裁剪轨迹；拆 `page.tsx` 让历史进首屏 HTML | 刷新后对话还在（含工具轨迹卡片）；两轮之间「换一首」能生效；中断过的轮次下一轮不报错 |
-| **3b · 记忆（⑥）** ⬜ | 写入（加一个工具）→ 存储（加一张表）→ 注入（`buildSystemPrompt` 多一个参数） | 长期事实跨会话保留 |
+| **3b · 记忆（⑥）** ✅ | 写入（两个工具）→ 存储（`preferences` 表）→ 注入（`buildSystemPrompt` 多一个参数） | 说了「我不喜欢摇滚」→ **新开一次对话**（历史为空）它仍知道；说「不用记了」→ 立刻不再提及 |
 | **4 · 观测与评测** ⬜ | ⑨ 落库 → 指标 → 归因 | 能回答"这次为什么答错了" |
 
 **阶段 2 是分水岭**：阶段 1 只是把玩具的地基换成了标准件，**它不会让 agent 变得更"合心意"**。
