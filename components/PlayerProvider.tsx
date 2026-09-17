@@ -19,6 +19,13 @@ const EMPTY: PlayerSnapshot = {
 	queueSize: 0,
 	queueIndex: -1,
 	queue: [],
+	queueSource: 'library',
+	queueLabel: null,
+	// 与 `server/player/state.ts` 的初始值一致：SSE 连上之前先按默认值渲染，
+	// 这个窗口只有几十毫秒，不一致也不会被谁看见。
+	volume: 0.8,
+	mode: 'seq',
+	shuffle: false,
 };
 
 const PlayerSnapshotContext = createContext<PlayerSnapshot>(EMPTY);

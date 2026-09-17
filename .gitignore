@@ -18,6 +18,10 @@
 # 构建产物被怀疑干扰排查时，惯用作法是 `mv .next .next_stale_<时间戳>` 再重建。
 # 那份副本同样不该入库（2026-09-15 曾误提交 525 个文件，已 git rm --cached）。
 /.next_stale_*/
+# 同一个用途的另一种命名（2026-09-17 用了 .next_old_<ts>，没被上面这条接住：
+# eslint 会把死构建树整个 lint 一遍，几百条 error 全出自那里，看着却像代码坏了）。
+# 一次性脚本同理，按惯例写到 scripts/*.tmp.mjs（下面有规则），别写进 .workbuddy/。
+/.next_old_*/
 /out/
 
 # production

@@ -1,9 +1,9 @@
 /**
  * In-memory player state — 方案 C 后的职责收敛。
  *
- * 维护播放状态机（state / currentTrack / queue / currentIndex），音频输出
- * 交给浏览器 `<audio>` 元素（见 components/PlayerControls.tsx）。方案 C
- * 之前这里还负责"模拟播放"（positionSec 推进），现在 positionSec 由前端
+ * 维护播放状态机（state / currentTrack / queue / currentIndex）+ 两组**设备侧设定**
+ * （volume / mode / shuffle），音频输出交给浏览器 `<audio>` 元素。
+ * 方案 C 之前这里还负责"模拟播放"（positionSec 推进），现在 positionSec 由前端
  * `audio.currentTime` 驱动，本模块只做状态管理。
  *
  * SSE 推送：每次状态变更通过内部 EventEmitter 通知所有订阅者（/api/player/events
@@ -12,10 +12,19 @@
  *
  * `queue` 初始化为完整音乐库，确保 `next_track` 总有下一首可跳。
  * `currentIndex` 指向 queue 中当前播放项。
+ *
+ * ── 队列不再恒等于整库（2026-09-17，BLUEPRINT 阶段 3d）─────────────────
+ * 从阶段 0 起队列就只有一种形态：整个曲库（`ensureQueue(getSongs())` 每次点播都
+ * 这么改回去）。于是「来点安静的」只能一首一首搜着播，而 `next_track` 转眼又
+ * 跑回整库顺序 —— 队列不是「用户此刻想听的那一批」，只是个书签。
+ * 现在多了 `queueSource`：
+ *   - `'library'`（默认）：行为与从前完全一致；
+ *   - `'custom'` ：`setQueueAndPlay` 换来的一批，`ensureQueue` 会**主动让路**。
+ * 一个字段的代价，换来「按条件组队列」这件事在状态层成立。
  */
 import { EventEmitter } from 'node:events';
 import { getSongs, type Song } from '../library';
-import type { PlayerSnapshot } from '../../contract/player';
+import type { PlaybackMode, PlayerSnapshot, QueueSource } from '../../contract/player';
 
 export type PlayerState = {
 	state: 'stopped' | 'playing' | 'paused';
@@ -23,7 +32,20 @@ export type PlayerState = {
 	positionSec: number;
 	queue: Song[];
 	currentIndex: number;
+	/** 这一批队列从哪来。见 `contract/player.ts` 的 `QueueSource`。 */
+	queueSource: QueueSource;
+	/** 队列的人话名字（仅 `'custom'` 时有意义）。进 ⑦ 提示词。 */
+	queueLabel: string | null;
+	/** 音量 0–1（设备侧是真相，这里是镜像，见 `contract/player.ts`）。 */
+	volume: number;
+	/** 循环方式：顺序 / 列表 / 单曲。 */
+	mode: PlaybackMode;
+	/** 随机开关（独立于循环方式）。 */
+	shuffle: boolean;
 };
+
+/** 默认音量。与 `components/player-events.ts` 的 `loadVolume()` 必须一致。 */
+export const DEFAULT_VOLUME = 0.8;
 
 // `PlayerSnapshot` / `QueueItem`（推给前端的 wire 类型）已抽到 `contract/player.ts`，
 // 让前端能在不触碰本文件（依赖 node:events）的前提下引用它们。
@@ -45,6 +67,11 @@ const state: PlayerState = (g.__playerState ??= {
 	positionSec: 0,
 	queue: [],
 	currentIndex: -1,
+	queueSource: 'library',
+	queueLabel: null,
+	volume: DEFAULT_VOLUME,
+	mode: 'seq',
+	shuffle: false,
 });
 
 // 队列初始化标记（`__playerQueueInit`）由 `initQueueFromLibrary` 自管：
@@ -75,6 +102,11 @@ export function getSnapshot(): PlayerSnapshot {
 		queueSize: queue.length,
 		queueIndex: currentIndex,
 		queue: queue.map((s) => ({ id: s.id, title: s.title, artist: s.artist })),
+		queueSource: state.queueSource,
+		queueLabel: state.queueLabel,
+		volume: state.volume,
+		mode: state.mode,
+		shuffle: state.shuffle,
 	};
 }
 
@@ -100,8 +132,14 @@ export function getPlayerState(): PlayerState {
  * Sync the queue with the actual library (Phase 7). Only replaces the queue
  * if the set of song IDs differs from the current queue, so it's safe to
  * call on every play request without resetting playback position.
+ *
+ * **自定义队列（`queueSource === 'custom'`）直接让路**：这个函数的存在理由是
+ * 「队列等于曲库」这一种形态，而那已经不再是唯一的形态。若不放行，用户刚让
+ * agent 组好的「安静的歌」会被下一次点播（前端点一下、或 agent 调 play_track）
+ * 悄悄换回整库顺序 —— 不报错、只是那一批歌没了。
  */
 export function ensureQueue(songs: Song[]): void {
+	if (state.queueSource === 'custom') return; // 见上方说明：这不是本函数的辖区
 	const currentIds = new Set(state.queue.map((s) => s.id));
 	const newIds = new Set(songs.map((s) => s.id));
 	if (currentIds.size === newIds.size && [...currentIds].every((id) => newIds.has(id))) {
@@ -136,14 +174,70 @@ export async function initQueueFromLibrary(): Promise<void> {
 	}
 }
 
-/** Start playing a specific track by id. Returns the updated state. */
-export function playTrackById(trackId: string): PlayerState | undefined {
-	const idx = state.queue.findIndex((song) => song.id === trackId);
-	if (idx === -1) return undefined;
-	state.currentIndex = idx;
-	state.currentTrack = state.queue[idx];
+/**
+ * 播放一首歌。**队列里没有它就追加到队尾**（音乐 App 的常规语义：
+ * 「放这首」= 现在放，放完接着原来的往下走）。
+ *
+ * 为什么不做「不在队列里就报 404」：队列从前恒等于整库，所以「不在队列里」
+ * 不可能发生，这条分支从来没被写过。自定义队列出现之后它**天天会发生**——
+ * agent 刚组了一批「安静的歌」，用户说「放荷塘月色」而它不在这批里。
+ * 报错会把一件完全合理的事说成失败；换回整库顺序则会**悄悄丢掉那一批**。
+ * 追加没有这两个问题，而且不改变 `queueSource`（那批歌还在，只是多了这一首）。
+ */
+export function playTrack(song: Song): PlayerState {
+	const idx = state.queue.findIndex((s) => s.id === song.id);
+	if (idx === -1) {
+		state.queue = [...state.queue, song];
+		state.currentIndex = state.queue.length - 1;
+	} else {
+		state.currentIndex = idx;
+	}
+	state.currentTrack = state.queue[state.currentIndex];
 	state.positionSec = 0;
 	state.state = 'playing';
+	emitChange();
+	return state;
+}
+
+/**
+ * 换一批队列并开始放第一首 —— 「按条件组队列」的落点。
+ *
+ * 为什么「换队列」与「开播」绑在一起：用户说「来点安静的」要的是**听到**，
+ * 不是得到一张待播清单。分开成两个动作只会让模型多调一次工具、多一次猜错的机会。
+ *
+ * `source: 'library'` 用于「别只放这几首了」那种**恢复整库**的请求（见
+ * `app/api/player/queue/route.ts`）；默认 `'custom'` 才是组队列的正常路径。
+ */
+export function setQueueAndPlay(
+	songs: Song[],
+	opts: { label?: string | null; source?: QueueSource } = {},
+): PlayerState | undefined {
+	if (songs.length === 0) return undefined; // 空队列不是一种可播放状态，交给调用方报错
+	state.queue = [...songs];
+	state.queueSource = opts.source ?? 'custom';
+	state.queueLabel = opts.label?.trim() ? opts.label.trim() : null;
+	state.currentIndex = 0;
+	state.currentTrack = state.queue[0];
+	state.positionSec = 0;
+	state.state = 'playing';
+	emitChange();
+	return state;
+}
+
+/**
+ * 改音量（0–1，越界已由路由夹紧）。**返回值里没有「变没变」这回事**：
+ * 设成当前值也算成功 —— 幂等，前端拖到哪就是哪，不必先读再比。
+ */
+export function setVolume(volume: number): PlayerState {
+	state.volume = volume;
+	emitChange();
+	return state;
+}
+
+/** 改播放方式（循环方式与随机开关，各自可选）。两者一起改是因为它们在 UI 上就是一组。 */
+export function setPlayback(opts: { mode?: PlaybackMode; shuffle?: boolean }): PlayerState {
+	if (opts.mode) state.mode = opts.mode;
+	if (typeof opts.shuffle === 'boolean') state.shuffle = opts.shuffle;
 	emitChange();
 	return state;
 }

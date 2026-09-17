@@ -191,7 +191,12 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 	/** 标题栏副标题：只给单卡面板用，合并态显示标签页就够了 */
 	const subtitleOf = (card: CardId) => {
 		if (card === 'lyrics') return track ? `${track.title} · ${track.artist}` : undefined;
-		if (card === 'queue') return `${snap.queue.length} 首`;
+		// 队列卡：自定义队列（agent 按条件挑的一批）要把**名字**露出来，
+		// 否则用户看着「6 首」会以为是曲库丢了歌。
+		if (card === 'queue') {
+			const label = snap.queueSource === 'custom' ? snap.queueLabel : null;
+			return label ? `${label} · ${snap.queue.length} 首` : `${snap.queue.length} 首`;
+		}
 		return undefined;
 	};
 

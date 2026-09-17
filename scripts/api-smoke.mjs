@@ -54,9 +54,12 @@ let keyword = '';
 let trackId = '';
 let lyricId = '';
 let coverId = '';
+/** 曲库里有几首（决定「翻页」用例能不能成立）。 */
+let songCount = 0;
 {
 	const probe = await call({ path: '/api/library/search?q=&limit=50' });
 	const songs = probe.json?.data?.songs ?? [];
+	songCount = Number(probe.json?.data?.total ?? songs.length) || 0;
 	const first = songs[0];
 	if (first?.title) keyword = String(first.title).slice(0, 2);
 	if (first?.id) trackId = String(first.id);
@@ -65,6 +68,13 @@ let coverId = '';
 	lyricId = String((songs.find((s) => s.hasLyrics) ?? first)?.id ?? '');
 	coverId = String(songs.find((s) => s.hasCover)?.id ?? '');
 }
+
+/**
+ * 音量 / 播放方式的**现场**。下面是真实库上的一次真实改动，跑完必须还原 ——
+ * 把用户的音量留在 42% 是那种"没人看得出来"的副作用（服务端那份还是它给 agent
+ * 看的镜像，留着错值会让模型据实说错话）。
+ */
+const settingsBefore = (await call({ path: '/api/player/settings' })).json?.data ?? null;
 
 /**
  * @type {Array<{
@@ -84,6 +94,22 @@ const CASES = [
 		assert: (j) => (j.data?.count > 0 ? null : `搜不到已知歌曲「${keyword}」`),
 		note: '查询词取自曲库首曲标题前两字',
 	},
+	...(songCount > 1
+		? [
+				{
+					id: 'library/search(offset)',
+					path: '/api/library/search?q=&limit=1&offset=1',
+					expect: 'ok',
+					// 只断言「回传了 offset」是空的：它证明参数被解析了，却证明不了它**被用了**。
+					// 真正有意义的是「第二页不是第一页那一首」。
+					assert: (j) =>
+						j.data?.songs?.[0]?.id && j.data.songs[0].id !== trackId
+							? null
+							: `翻页没生效：offset=1 仍然返回首曲 ${trackId}`,
+					note: '曲库只有一首时本用例自动略过（翻页无从验证）',
+				},
+			]
+		: []),
 	{
 		id: 'library/lyrics',
 		path: `/api/library/lyrics?trackId=${encodeURIComponent(lyricId)}`,
@@ -122,6 +148,77 @@ const CASES = [
 		path: '/api/history?limit=50',
 		expect: 'ok',
 		assert: (j) => (Array.isArray(j.data?.plays) && j.data.plays.length > 0 ? null : '播放后播放历史仍为空'),
+	},
+
+	// ── 队列：按条件组队列的落点（换一批 → 读回 → 恢复整库）──
+	// 只能验「换成了一批、再恢复回整库」，验不了「挑得对不对」——那是效果层，
+	// 不在本脚本的能力边界内（见文件头）。
+	{
+		id: 'player/queue(自定义)',
+		method: 'POST',
+		path: '/api/player/queue',
+		body: { trackIds: [trackId], label: '冒烟探针' },
+		expect: 'ok',
+		assert: (j) =>
+			j.data?.queueSource === 'custom' && j.data?.queueSize === 1
+				? null
+				: `队列未换成自定义：source=${j.data?.queueSource} size=${j.data?.queueSize}`,
+		note: '自带还原用例：下一条把队列恢复成整库',
+	},
+	{
+		id: 'player/queue(恢复整库)',
+		method: 'POST',
+		path: '/api/player/queue',
+		body: { trackIds: [] },
+		expect: 'ok',
+		// 空数组 = 「没有条件」那一批 = 整个曲库。这条同时是上一条的清理动作：
+		// 留下一个只有一首歌的队列，下一次「下一首」就会撞到队尾。
+		assert: (j) =>
+			j.data?.queueSource === 'library' && j.data?.queueSize > 0
+				? null
+				: `未恢复整库：source=${j.data?.queueSource} size=${j.data?.queueSize}`,
+	},
+
+	// ── 音量 / 播放方式：改 → 读回 → 夹紧 → **还原现场** ──
+	{
+		id: 'player/settings(POST 音量)',
+		method: 'POST',
+		path: '/api/player/settings',
+		body: { volume: 0.42 },
+		expect: 'ok',
+		assert: (j) =>
+			typeof j.data?.volume === 'number' && Math.abs(j.data.volume - 0.42) < 1e-6
+				? null
+				: `音量未生效：${JSON.stringify(j.data?.volume)}`,
+	},
+	{
+		id: 'player/settings(GET 读回)',
+		path: '/api/player/settings',
+		expect: 'ok',
+		assert: (j) =>
+			typeof j.data?.volume === 'number' && Math.abs(j.data.volume - 0.42) < 1e-6
+				? null
+				: '写入后读不回来（GET 与 POST 应共用同一份状态）',
+	},
+	{
+		id: 'player/settings(越界夹紧)',
+		method: 'POST',
+		path: '/api/player/settings',
+		body: { volume: 5 },
+		expect: 'ok',
+		// 越界不报错、夹到边界 —— 前端拖到边缘时给的就是 0 或 1，为它抛 400 没意义
+		assert: (j) => (j.data?.volume === 1 ? null : `越界值应夹到 1，实际 ${JSON.stringify(j.data?.volume)}`),
+	},
+	{
+		id: 'player/settings(POST 播放方式)',
+		method: 'POST',
+		path: '/api/player/settings',
+		body: { mode: 'one', shuffle: true },
+		expect: 'ok',
+		assert: (j) =>
+			j.data?.mode === 'one' && j.data?.shuffle === true
+				? null
+				: `播放方式未生效：mode=${j.data?.mode} shuffle=${j.data?.shuffle}`,
 	},
 
 	// ── ⑥ 记忆（写 → 读回 → 删，三步按顺序跑；探针 key 在循环外兜底清理）──
@@ -172,6 +269,19 @@ const CASES = [
 			const joined = Array.isArray(t.tags) ? t.tags.join('|') : null;
 			return joined === 'chinese|pop' ? null : `标签未归一化：${JSON.stringify(t?.tags)}`;
 		},
+	},
+	{
+		// 无参形态是 `list_tags` 工具（答「都有哪些风格」）的数据源。它与上面那条
+		// `?trackId=` 是同一路由的两个分支，**两条都要有用例**：只测一条时，另一条
+		// 改坏了没人知道（`if (trackId)` 写反过一次都看不出来）。
+		id: 'library/tags(GET 全量)',
+		path: '/api/library/tags',
+		expect: 'ok',
+		assert: (j) =>
+			j.data?.tags?.some((row) => row.trackId === 'smoke-probe-track')
+				? null
+				: '无参 GET 没带上刚写入的那条（全量表应含它）',
+		note: '必须排在 tags(POST) 之后——它断言的就是"刚写进去的能被全量读出来"',
 	},
 	{
 		id: 'library/tags(GET)',
@@ -260,6 +370,34 @@ for (const c of CASES) {
 // 标签探针会一直挂在标签列表里。
 await call({ method: 'DELETE', path: '/api/preferences?key=smoke_probe' }).catch(() => {});
 await call({ method: 'DELETE', path: '/api/library/tags?trackId=smoke-probe-track' }).catch(() => {});
+
+// 音量 / 播放方式同理：把它们还原成开跑前的现场。少了这一步，跑一次冒烟就会把
+// 用户的音量固定成 42%、播放方式固定成单曲循环 + 随机。
+const settingsFallback = {
+	volume: typeof settingsBefore?.volume === 'number' ? settingsBefore.volume : 0.8,
+	mode: settingsBefore?.mode ?? 'seq',
+	shuffle: typeof settingsBefore?.shuffle === 'boolean' ? settingsBefore.shuffle : false,
+};
+await call({ method: 'POST', path: '/api/player/settings', body: settingsFallback }).catch(() => {});
+
+// 还原本身也要**被验证**，否则它和「没写还原」在报告里长得一样（都只有一次静默 POST）。
+// 判据就是 BLUEPRINT §7 里写的：跑完再 GET 一次，值应与跑之前相同。
+const settingsAfter = (await call({ path: '/api/player/settings' }).catch(() => null))?.json?.data ?? null;
+const restoredOk =
+	settingsAfter !== null &&
+	Math.abs((settingsAfter.volume ?? -1) - settingsFallback.volume) < 1e-6 &&
+	settingsAfter.mode === settingsFallback.mode &&
+	settingsAfter.shuffle === settingsFallback.shuffle;
+if (!restoredOk) failed += 1;
+rows.push({
+	id: 'player/settings(还原现场)',
+	verdict: restoredOk ? 'PASS' : 'FAIL',
+	code: 200,
+	detail: restoredOk
+		? `音量 ${Math.round(settingsFallback.volume * 100)}% · ${settingsFallback.mode}${settingsFallback.shuffle ? ' · 随机' : ''}`
+		: `未还原成开跑前的值：${JSON.stringify(settingsAfter)}`,
+	note: '开跑前先 GET 存现场，跑完写回并**读回确认**',
+});
 
 const W = Math.max(...rows.map((r) => r.id.length));
 console.log(`\nAPI 冒烟测试  BASE=${BASE}\n${'─'.repeat(78)}`);

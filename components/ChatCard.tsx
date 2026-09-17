@@ -24,13 +24,28 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import type { ToolOutcome } from '@/contract/tool';
 
-/** 工具名的中文标签；未登记的走原始名。 */
+/**
+ * 工具名的中文标签；未登记的走原始名。
+ *
+ * ⚠️ **加工具时这里也要加一行**：漏了不报错、单测也不红，只是轨迹卡上突兀地出现一个
+ * 英文下划线名（如 `set_track_tags`）——2026-09-17 就是这么漏掉三个的。
+ * 补的时候顺手核对 `agent/tools.ts` 里的键名，两边没有任何机制保证同步。
+ */
 const TOOL_LABEL: Record<string, string> = {
 	search_library: '检索曲库',
 	play_track: '播放曲目',
+	build_queue: '换一批队列',
 	next_track: '下一首',
 	pause_playback: '暂停',
 	resume_playback: '继续播放',
+	jump_in_queue: '队列跳转',
+	set_volume: '调整音量',
+	set_playback_mode: '播放方式',
+	recent_plays: '播放历史',
+	list_tags: '标签一览',
+	remember_preference: '记住偏好',
+	forget_preference: '忘掉偏好',
+	set_track_tags: '重设标签',
 };
 
 /** 轨迹卡片要展示的三样东西。 */

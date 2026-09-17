@@ -23,12 +23,25 @@
  *    单曲循环（本地 seek+play）/ 顺序 / 列表循环 / 随机（jump/next BFF）。
  *
  * 断点续传：timeupdate 存 localStorage，loadeddata 恢复。音量偏好同样持久化。
+ *
+ * 音量与播放方式（mode / shuffle）：**真相在本机**（localStorage + 这个 audio 元素），
+ * 服务端那份只是镜像，好让 agent 看得见、改得动。两个方向各一条路，见
+ * `player-events.ts` 的文件头与下面的 `lastSettingsRef` 效果。
  */
 'use client';
 import { useEffect, useRef, useState } from 'react';
-import type { PlayerSnapshot, QueueItem } from '@/contract/player';
+import type { PlaybackMode, PlayerSnapshot, QueueItem } from '@/contract/player';
 import { usePlayerSnapshot } from './PlayerProvider';
-import { loadMode, loadShuffle, loadVolume, PLAYER_EVENTS } from './player-events';
+import {
+	applyMode,
+	applyShuffle,
+	applyVolume,
+	loadMode,
+	loadShuffle,
+	loadVolume,
+	PLAYER_EVENTS,
+	reportSettings,
+} from './player-events';
 import { LS_KEYS } from './storage-keys';
 
 const AP_CDN_JS = 'https://unpkg.com/aplayer@1.10.1/dist/APlayer.min.js';
@@ -464,6 +477,33 @@ export function APlayerPlayer() {
 	useEffect(() => {
 		snapRef.current = snap;
 	}, [snap]);
+
+	/**
+	 * 设备侧设定（音量 / 播放方式）与服务端的双向同步 —— 见 `player-events.ts` 的文件头。
+	 *
+	 * 判据是**「快照里的值变了」**，不是「快照里的值与本机不同」。差别就在拖音量条
+	 * 的那一刻：本机已经改了、上报还在路上，此时到达的服务端旧快照与本机**不同**，
+	 * 按后者判会把用户的拖动**回退**回去（拖到 30%，跳回 80%）。按前者判时，那个
+	 * 旧值与"上一次看到的快照值"相同，于是被正确地忽略。
+	 */
+	const lastSettingsRef = useRef<{
+		volume: number;
+		mode: PlaybackMode;
+		shuffle: boolean;
+	} | null>(null);
+	useEffect(() => {
+		const prev = lastSettingsRef.current;
+		lastSettingsRef.current = { volume: snap.volume, mode: snap.mode, shuffle: snap.shuffle };
+		// 首个快照（prev 为 null）：只把**本机的**设定报上去，不往本机写。
+		// 反过来的话，服务端的默认值（80% / 顺序播放）会在开页第一秒盖掉用户的偏好。
+		if (!prev) {
+			reportSettings({ volume: loadVolume(), mode: loadMode(), shuffle: loadShuffle() });
+			return;
+		}
+		if (snap.volume !== prev.volume) applyVolume(snap.volume);
+		if (snap.mode !== prev.mode) applyMode(snap.mode);
+		if (snap.shuffle !== prev.shuffle) applyShuffle(snap.shuffle);
+	}, [snap.volume, snap.mode, snap.shuffle]);
 
 	// 共享 SSE：首次拿到非空队列时从 CDN 加载并初始化 APlayer，之后每次快照变化同步 UI。
 	// 不再各自维护 EventSource，也不再用 force 重渲染（本组件只渲染容器/兜底文案）。

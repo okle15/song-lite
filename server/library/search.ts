@@ -25,15 +25,17 @@ export type SongSummary = Song & { tags: string[] };
 
 export interface LibrarySearchResult {
 	query: string;
+	/** 本页的起始下标（调用方给的翻页位置）。 */
+	offset: number;
 	/** 本次实际返回的条数（受 limit 限制）。 */
 	count: number;
-	/** 命中的总条数（未受 limit 限制）。 */
+	/** 命中的总条数（未受 limit / offset 限制）。 */
 	total: number;
 	songs: SongSummary[];
 }
 
 /**
- * 搜索曲库。`q` 已由调用方 trim + lowercase；`limit` 已夹紧在 1..50。
+ * 搜索曲库。`q` 已由调用方 trim + lowercase；`limit` 已夹紧在 1..50、`offset` ≥ 0。
  *
  * 匹配三个文本字段（曲名 / 歌手 / 专辑）**再加上标签**。加标签这一步是重点：
  * 「有没有适合睡觉的」这类风格请求，文本字段永远答不出来 —— 歌名里不会写着
@@ -41,8 +43,16 @@ export interface LibrarySearchResult {
  *
  * 标签一次全量读进 Map 而不是逐首点查：标签表最大就是曲库大小，
  * 一次 `SELECT` + 建索引比 N 次往返便宜，也更容易读。
+ *
+ * `offset` 是 2026-09-17 补的：只有 `limit` 时，「列出全部」（`q` 空）在曲库长过
+ * 50 首之后会被**静默截断**——模型看到 50 条会以为那就是全部，还说得很有把握。
+ * 翻页参数不会让截断消失，但让「还有更多」变成一件可说、可查的事。
  */
-export async function searchLibrary(q: string, limit: number): Promise<LibrarySearchResult> {
+export async function searchLibrary(
+	q: string,
+	limit: number,
+	offset = 0,
+): Promise<LibrarySearchResult> {
 	const songs = await getSongs();
 	const tagsById = new Map(listTrackTags().map((t) => [t.trackId, t.tags]));
 
@@ -56,10 +66,12 @@ export async function searchLibrary(q: string, limit: number): Promise<LibrarySe
 			})
 		: songs;
 
+	const page = matched.slice(offset, offset + limit);
 	return {
 		query: q,
-		count: Math.min(matched.length, limit),
+		offset,
+		count: page.length,
 		total: matched.length,
-		songs: matched.slice(0, limit).map((s) => ({ ...s, tags: tagsById.get(s.id) ?? [] })),
+		songs: page.map((s) => ({ ...s, tags: tagsById.get(s.id) ?? [] })),
 	};
 }

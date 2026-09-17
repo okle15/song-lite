@@ -35,10 +35,14 @@ MV 视频播放、统计概览。**AI 打标回来了，但换了形态**：不�
 改由 `track_tags` 表承载（AI 打底 + 用户覆盖）——重跑打标**不会覆盖用户手改过的标签**。
 
 **Agent**：对话是布局系统里的一张普通卡（`chat`，⌘K 唤起），协议交给 Vercel AI SDK
-（`/api/agent`）。当前有 **8 个工具**（5 个播放 + 2 个记忆 + 1 个曲目标签）、**会话历史**
-（跨刷新保留，发送前裁掉历史轮的工具轨迹）与**记忆**（`remember` / `forget_preference`
-记下的长期偏好跨对话注入系统提示词）。观测 / 触发器未做——加什么、加在哪、凭什么这么判断，
-全在 [BLUEPRINT.md](./BLUEPRINT.md)。
+（`/api/agent`）。当前有 **14 个工具**：检索与播放 3 个（检索 / 播放单曲 / **按条件换一批队列**）、
+播放控制 4 个（下一首 / 暂停 / 继续 / 按位置跳转）、**播放设置 2 个**（音量 / 播放方式）、
+认知写入 3 个（记住 / 忘掉偏好、增删曲目标签）、只读回顾 2 个（播放历史、标签一览）。
+另有**会话历史**（跨刷新保留，发送前裁掉历史轮的工具轨迹）与**记忆**（长期偏好跨对话注入
+系统提示词）。系统提示词的实时状态块里带着**队列窗口**（当前附近几首 + 「前 / 后 N 首略」，
+自定义队列还会写明「按什么挑的一批」）、**当前音量与播放方式**——`jump_in_queue` 的「第几首」、
+`set_volume` 的「小声点」都照它数/算。观测 / 触发器未做——
+加什么、加在哪、凭什么这么判断，全在 [BLUEPRINT.md](./BLUEPRINT.md)。
 
 ---
 
@@ -63,20 +67,22 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 
 ---
 
-## API 一览（14 个）
+## API 一览（16 个）
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/api/library/search?q=&limit=` | 曲库检索（`q` 空 = 整库），标题/歌手/专辑子串匹配，**并匹配标签** |
+| GET | `/api/library/search?q=&limit=&offset=` | 曲库检索（`q` 空 = 整库），标题/歌手/专辑子串匹配，**并匹配标签**；`offset` 翻页（命中 > limit 时返回值会给出下一个 offset） |
 | GET | `/api/library/stream?trackId=` | 音频字节流，支持 Range（seek 靠它） |
 | GET | `/api/library/lyrics?trackId=&raw=` | LRC 歌词，**优先读音频内嵌（ID3 USLT）、`.lrc` 兜底**；`raw=1` 返回 text/plain |
 | GET | `/api/library/cover?trackId=` | 内嵌封面（ID3 APIC）的**原始图片字节**；无封面 → 404，前端据此回落渐变 |
-| GET/POST/DELETE | `/api/library/tags` | **曲目风格标签**。GET 列出（`?trackId=` 取单曲）；POST `{trackId, tags}` 重设 —— **走这条 HTTP 路径就等于「人在说话」→ `source='user'`，无条件覆盖 AI**；DELETE `?trackId=` 清掉。agent 的 `set_track_tags` 工具走这里 |
-| GET | `/api/player/events` | **SSE**，播放状态的唯一推送源 |
-| GET/POST | `/api/player/play` | GET 轮询当前状态；POST `{trackId}` 点播 |
+| GET/POST/DELETE | `/api/library/tags` | **曲目风格标签**。GET 列出（`?trackId=` 取单曲）；POST `{trackId, tags}` **重设**——**走这条 HTTP 路径就等于「人在说话」→ `source='user'`，无条件覆盖 AI**；DELETE `?trackId=` 清掉。agent 的 `set_track_tags` 工具走这里（它自己先读、再算增删、最后调这个重设） |
+| GET | `/api/player/events` | **SSE**，播放状态的唯一推送源（快照含队列来源、音量、播放方式） |
+| GET/POST | `/api/player/play` | GET 轮询当前状态；POST `{trackId}` 点播（**不在队列里就追加到队尾**，见 BLUEPRINT §7） |
 | POST | `/api/player/pause` · `/resume` | 暂停 / 续播（无播放中 → 409） |
 | POST | `/api/player/next` | 下一首；到队尾返回 `stopped` |
 | POST | `/api/player/jump` | `{index}` 跳到队列第 index 首 |
+| POST | `/api/player/queue` | **换一批队列**：`{trackIds, label}` 换成自定义队列并开播；**`{trackIds: []}`（或省略）= 恢复整个曲库**。agent 的 `build_queue` 走这里 |
+| GET/POST | `/api/player/settings` | **音量 / 播放方式**。GET 读当前值；POST `{volume?, mode?, shuffle?}`（0–1，越界夹紧；只改给了的字段）。agent 的 `set_volume` / `set_playback_mode` 走这里 |
 | GET | `/api/history?limit=` | 播放历史，时间倒序（默认 20，上限 200） |
 | GET/POST/DELETE | `/api/preferences` | **偏好（Agent 的长期记忆）**。GET 列出；POST `{key, value}` 记住一条（同 key 覆盖）；DELETE `?key=` 忘掉一条。agent 的 `remember` / `forget_preference` 工具走的就是这里 |
 | POST | `/api/agent` | **对话端点**（SSE）。body `{messages, snapshot}`；协议是 AI SDK 的 UI 消息流（响应头 `x-vercel-ai-ui-message-stream: v1`），收尾是**裸** `data: [DONE]` |
@@ -120,7 +126,7 @@ data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
 - `preferences` 的 `key` 是「什么算同一条偏好」的载体（`contract/preference.ts` 的
   `normalizePreferenceKey` 统一归一化），所以用户说五遍「不喜欢摇滚」只会有一条。
   注入时取最近更新的 30 条，全量塞进系统提示词——不做向量检索。
-- 写入时机：`/api/player/{play,next,jump}` **成功切歌**时记一行（`pause`/`resume` 不算新播放）。
+- 写入时机：`/api/player/{play,next,jump,queue}` **成功切歌**时记一行（`pause`/`resume` 不算新播放）。
 - 刻意**不开 WAL**：默认 journal 模式下落盘只有单个 `.db`，不留 `-wal` / `-shm` 尾巴，
   「删一个文件就干净」。
 - 删掉 `data/app.db` 即归零，服务下次写入时自动重建。
