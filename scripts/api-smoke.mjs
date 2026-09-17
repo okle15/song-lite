@@ -45,13 +45,25 @@ async function call(c) {
 	}
 }
 
-// 关键词用例的查询词从**实际曲库**派生，而不是写死某首歌名——
-// 曲库换了（换了 mp3）时不会假红。
+// 关键词与 trackId 都从**实际曲库**派生，而不是写死 —— 曲库换了（换 mp3 / 改文件名）
+// 时不会假红。`Song.id` 就是曲库内相对路径，所以它同时是 `?trackId=` 与 `{trackId}`
+// 的合法取值。
+// 2026-09-17 教训：这里曾写死 `track-1`。id 从「slug 编号」改成相对路径后，播放与
+// 歌词两条用例就静默变成了永久 FAIL —— 脚本照跑、不报错，只是没人看它输出。
 let keyword = '';
+let trackId = '';
+let lyricId = '';
+let coverId = '';
 {
-	const probe = await call({ path: '/api/library/search?q=' });
-	const first = probe.json?.data?.songs?.[0];
-	if (first?.title) keyword = first.title.slice(0, 2);
+	const probe = await call({ path: '/api/library/search?q=&limit=50' });
+	const songs = probe.json?.data?.songs ?? [];
+	const first = songs[0];
+	if (first?.title) keyword = String(first.title).slice(0, 2);
+	if (first?.id) trackId = String(first.id);
+	// 歌词 / 封面不是每首都有，各自挑一首**确实有**的来验：拿没有封面的曲目去请求
+	// 封面必然 404，那是设计里的正常分支（前端据此回落渐变），不该报成接口坏了。
+	lyricId = String((songs.find((s) => s.hasLyrics) ?? first)?.id ?? '');
+	coverId = String(songs.find((s) => s.hasCover)?.id ?? '');
 }
 
 /**
@@ -72,10 +84,32 @@ const CASES = [
 		assert: (j) => (j.data?.count > 0 ? null : `搜不到已知歌曲「${keyword}」`),
 		note: '查询词取自曲库首曲标题前两字',
 	},
-	{ id: 'library/lyrics', path: '/api/library/lyrics?trackId=track-1', expect: 'ok', assert: (j) => (j.data?.lrc ? null : '无歌词') },
+	{
+		id: 'library/lyrics',
+		path: `/api/library/lyrics?trackId=${encodeURIComponent(lyricId)}`,
+		expect: 'ok',
+		assert: (j) => (j.data?.lrc ? null : '无歌词'),
+		note: '优先读音频内嵌歌词（ID3 USLT），.lrc 只是兜底',
+	},
+	// 下面两条返回的是**流**（text/plain / 图片字节），没有信封 —— 2xx 即通过。
+	{
+		id: 'library/lyrics(raw)',
+		path: `/api/library/lyrics?trackId=${encodeURIComponent(lyricId)}&raw=1`,
+		expect: 'ok',
+	},
+	...(coverId
+		? [
+				{
+					id: 'library/cover',
+					path: `/api/library/cover?trackId=${encodeURIComponent(coverId)}`,
+					expect: 'ok',
+					note: '内嵌封面的原始字节；曲库里若没有带封面的曲目，本用例自动略过',
+				},
+			]
+		: []),
 
 	// ── 播放器 ──
-	{ id: 'player/play', method: 'POST', path: '/api/player/play', body: { trackId: 'track-1' }, expect: 'ok' },
+	{ id: 'player/play', method: 'POST', path: '/api/player/play', body: { trackId }, expect: 'ok' },
 	{ id: 'player/pause', method: 'POST', path: '/api/player/pause', body: {}, expect: 'ok' },
 	{ id: 'player/resume', method: 'POST', path: '/api/player/resume', body: {}, expect: 'ok' },
 	{ id: 'player/next', method: 'POST', path: '/api/player/next', body: {}, expect: 'ok' },
@@ -117,6 +151,39 @@ const CASES = [
 		id: 'preferences(DELETE)',
 		method: 'DELETE',
 		path: '/api/preferences?key=smoke_probe',
+		expect: 'ok',
+		assert: (j) => (j.data?.removed === true ? null : '删除应返回 removed:true'),
+	},
+
+	// ── 曲目风格标签（写 → 读回 → 删；同样必须按顺序跑）──
+	// 探针 id 用一个**库里不存在**的串：这条路径不校验 trackId 在不在库（它只管存），
+	// 所以用假 id 就不会把真实歌曲的标签覆盖成探针值。
+	{
+		id: 'library/tags(POST)',
+		method: 'POST',
+		path: '/api/library/tags',
+		body: { trackId: 'smoke-probe-track', tags: 'Pop,  Chinese  Pop' },
+		expect: 'ok',
+		// 故意喂「重复 + 大小写混杂 + 多余空白」：归一化必须落到 chinese,pop（拆词 + 去重 + 排序）。
+		// 同时验 source 由**入口**定成 user —— 请求体里根本没给这个字段，给了也不算数。
+		assert: (j) => {
+			const t = j.data?.tag;
+			if (t?.source !== 'user') return `source 应为 user（由入口决定），实际 ${JSON.stringify(t?.source)}`;
+			const joined = Array.isArray(t.tags) ? t.tags.join('|') : null;
+			return joined === 'chinese|pop' ? null : `标签未归一化：${JSON.stringify(t?.tags)}`;
+		},
+	},
+	{
+		id: 'library/tags(GET)',
+		path: '/api/library/tags?trackId=smoke-probe-track',
+		expect: 'ok',
+		assert: (j) =>
+			j.data?.tag?.tags?.includes('pop') ? null : '写入后读不回来（GET ?trackId= 应返回单条）',
+	},
+	{
+		id: 'library/tags(DELETE)',
+		method: 'DELETE',
+		path: '/api/library/tags?trackId=smoke-probe-track',
 		expect: 'ok',
 		assert: (j) => (j.data?.removed === true ? null : '删除应返回 removed:true'),
 	},
@@ -164,6 +231,17 @@ for (const c of CASES) {
 		verdict = 'KNOWN_EMPTY';
 		const n = json?.data?.count ?? 0;
 		detail = code === 0 ? `count=${n}（无数据）` : (json.message ?? '').slice(0, 70);
+	} else if (!isJson) {
+		// 流 / 二进制接口（音频、`lyrics?raw=1`、封面）：没有信封可看，2xx 即通过。
+		// 响应体已在 `call()` 里读掉丢弃 —— 封面动辄几百 KB，不能留在内存里等断言。
+		if (status >= 200 && status < 300) {
+			verdict = 'PASS';
+			detail = `HTTP ${status}（流）`;
+		} else {
+			verdict = 'FAIL';
+			failed += 1;
+			detail = `HTTP ${status}（流，期望 2xx）`;
+		}
 	} else {
 		const assertErr = c.assert ? c.assert(json, status) : null;
 		if (code === 0 && !assertErr) {
@@ -177,9 +255,11 @@ for (const c of CASES) {
 	rows.push({ id: c.id, verdict, code, detail, note: c.note });
 }
 
-// 兜底清理：偏好用例写的是**真实库**（data/app.db）。即使上面那条 DELETE 失败，
-// 也不能把探针 key 留在用户的库里——它会出现在之后每一轮对话的系统提示词里。
+// 兜底清理：偏好 / 标签用例写的都是**真实库**（data/app.db）。即使上面那两条 DELETE
+// 失败，也不能把探针留在用户的库里 —— 偏好探针会出现在之后每一轮对话的系统提示词里，
+// 标签探针会一直挂在标签列表里。
 await call({ method: 'DELETE', path: '/api/preferences?key=smoke_probe' }).catch(() => {});
+await call({ method: 'DELETE', path: '/api/library/tags?trackId=smoke-probe-track' }).catch(() => {});
 
 const W = Math.max(...rows.map((r) => r.id.length));
 console.log(`\nAPI 冒烟测试  BASE=${BASE}\n${'─'.repeat(78)}`);

@@ -45,7 +45,7 @@ interface LayoutValue {
 	resizePanes: (col: ColumnIndex, upperIdx: number, deltaPx: number, containerPx: number) => void;
 	/** 分隔条拖动：调整左右两列宽度（绝对比例模式）。 */
 	resizeCols: (ratio: number) => void;
-	/** 列底部把手：增量调整整列内容高度占比（列里只剩一张卡时也能调高度）。 */
+	/** 列底部把手：增量调整整列内容高度倍数（列里只剩一张卡时也能调高度）。 */
 	resizeColumnFill: (col: ColumnIndex, deltaPx: number, containerPx: number) => void;
 	setActiveCard: (paneId: string, card: CardId) => void;
 	mergeInto: (source: CardId, targetPaneId: string) => void;

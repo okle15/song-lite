@@ -26,6 +26,7 @@ import {
 	requestShuffle,
 	type PlaybackMode,
 } from './player-events';
+import { TrackCover } from './TrackCover';
 import { gradientFor } from '@/components/cover';
 import {
 	ListLoopIcon,
@@ -171,7 +172,6 @@ export function NowPlaying() {
 	};
 
 	const progress = duration > 0 ? Math.min(1, position / duration) : 0;
-	const coverChar = track ? (track.title.trim()[0] ?? '♪') : '♪';
 
 	if (!track) {
 		return (
@@ -203,12 +203,13 @@ export function NowPlaying() {
 			<div className="relative p-5">
 				{/* 渐变大封面 + 旋转黑胶角标 */}
 				<div className="relative mx-auto w-fit">
-					<div
-						className={`flex h-32 w-32 items-center justify-center rounded-3xl bg-gradient-to-br ${coverCls} text-5xl font-bold text-white transition-transform duration-500 ${isPlaying ? 'shadow-[0_16px_40px_-12px] shadow-brand/60' : 'scale-95 shadow-md'}`}
-						aria-hidden
-					>
-						{coverChar}
-					</div>
+					<TrackCover
+						id={track.id}
+						title={track.title}
+						hasCover={track.hasCover}
+						className={`h-32 w-32 rounded-3xl font-bold transition-transform duration-500 ${isPlaying ? 'shadow-[0_16px_40px_-12px] shadow-brand/60' : 'scale-95 shadow-md'}`}
+						charClassName="text-5xl text-white"
+					/>
 					<div
 						className={`absolute -bottom-1.5 -right-1.5 flex h-9 w-9 items-center justify-center rounded-full border border-border bg-surface-3 text-sm shadow-sm ${isPlaying ? 'animate-[spin_3s_linear_infinite]' : ''}`}
 						aria-hidden

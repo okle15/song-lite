@@ -17,7 +17,9 @@
  *  - 顶部 glass header：品牌标识（Private Music Hub / 私人音乐平台）+ 操作区
  *    （曲库 / 背景主题 / 快捷键 / 卡片 / 音乐助手）。
  *  - 主区域：可自由拉伸、可合并、可隐藏的面板布局（LayoutProvider 管理）：
- *      · 两列结构，列之间与同列面板之间都有可拖动分隔条；
+ *      · 两列结构。宽屏：列之间调宽度、同列卡片之间调高度，最后一张卡底部还能
+ *        调整整列内容的缩放倍数；窄屏：单列纵向铺开，列宽条不适用，但卡片高度
+ *        同样由权重决定，同列卡片之间的分隔条照常可拖（1:1 跟手）；
  *      · 每个面板可容纳多张卡片，多于一张时以标签页切换；
  *      · 面板标题栏 ⋯ 菜单支持与相邻面板合并 / 合并到任意面板 / 拆分 / 移到另一列 / 隐藏；
  *      · 按住标题栏左侧手柄拖到其它面板上可交换位置。
@@ -45,7 +47,7 @@ import { PlayerProvider, usePlayerSnapshot } from '@/components/PlayerProvider';
 import { QueueList } from '@/components/QueueList';
 import { ShortcutsPanel } from '@/components/ShortcutsPanel';
 import { ChatIcon, CloseIcon } from '@/components/icons';
-import { SplitHandle } from '@/components/SplitHandle';
+import { SPLIT_HANDLE_PX, SplitHandle } from '@/components/SplitHandle';
 import { ThemePanel } from '@/components/ThemePanel';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { useEscapeToClose } from '@/components/use-escape-to-close';
@@ -200,8 +202,18 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 		if (panes.length === 0) return null;
 		const colRef = colRefOf(col);
 		const totalFlex = panes.reduce((s, p) => s + p.flex, 0);
-		// 列内容高度占比：最后一张卡底部的把手调整的就是它（<1 时列下方留白）
+		// 列内容高度倍数：最后一张卡底部的把手调整的就是它（<1 留白，>1 溢出滚动）
 		const fill = layout.colFill[col];
+		// 分隔条也在这列里占位（N 张卡 → (N-1) 个中间条 + 1 个底部条）。
+		// 卡片的百分比之和是 100%，若不把这几条的高度扣出来，整列就恒溢出 8N px，
+		// 最后一个卡片的底边连同它的分隔条会被挤出可视区（详见 SPLIT_HANDLE_PX）。
+		const sepTotalPx = panes.length * SPLIT_HANDLE_PX;
+		/** 单张卡的高度 = 占比% − 这一格按权重分摊到的分隔条 px。 */
+		const paneHeightOf = (flex: number) => {
+			if (totalFlex <= 0) return undefined;
+			const share = flex / totalFlex;
+			return `calc(${(fill * share * 100).toFixed(4)}% - ${(sepTotalPx * share).toFixed(3)}px)`;
+		};
 
 		return (
 			<div
@@ -216,7 +228,7 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 								canMergeDown={i < panes.length - 1}
 								mergeTargets={allPanes.filter((p) => p.id !== pane.id)}
 								subtitle={subtitleOf(pane.active)}
-								heightPct={totalFlex > 0 ? (fill * pane.flex) / totalFlex : undefined}
+								paneHeight={paneHeightOf(pane.flex)}
 							focused={focusedPaneExists && focusedPaneId === pane.id}
 							onFocus={() => setFocusedPaneId(pane.id)}
 							onActive={(card) => setActiveCard(pane.id, card)}
@@ -232,17 +244,19 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 						</PaneShell>
 
 						{i < panes.length - 1 ? (
-							/* 卡片之间：上下交换高度权重 */
+							/* 卡片之间：上下交换高度权重。窄屏也保留——那里的卡片高度同样
+							   由权重定（CSS 用 `权重 × 单位高度`），拖起来一样是 1:1。 */
 							<SplitHandle
 								key="sep-mid"
 								orientation="horizontal"
 								containerRef={colRef}
 								onDelta={(deltaPx, size) => resizePanes(col, i, deltaPx, size)}
 								label={`调整「${paneLabel(panes[i + 1])}」与上方面板的高度`}
-								className="hidden lg:block"
 							/>
 						) : (
-							/* 最后一张卡的底部：调整整列内容高度占比（单卡列唯一的高度入口） */
+							/* 最后一张卡的底部：调整整列内容高度倍数（单卡列唯一的高度入口）。
+							   只有宽屏有它：「列高」在那里才存在，窄屏的列是内容高度，
+							   没有可以按比例缩放的基准，留白/溢出都无从谈起。 */
 							<SplitHandle
 								key="sep-end"
 								orientation="horizontal"

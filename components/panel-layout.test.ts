@@ -14,12 +14,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
 	ALL_CARD_IDS,
+	MAX_COL_FILL,
 	defaultLayout,
 	ensureVisible,
 	hideCard,
 	loadLayout,
 	mergeInto,
 	setActiveCard,
+	setColumnFill,
 	splitOut,
 	type CardId,
 	type Layout,
@@ -208,4 +210,32 @@ test('重复卡片：只保留第一份，不整体回退', () => {
 test('结构性损坏：列数不对 → 回退默认', () => {
 	const l = loadWithStored({ columns: [[]], colFlex: 0.58, colFill: [1, 1], hidden: [] });
 	assert.deepEqual(l, defaultLayout());
+});
+
+/**
+ * 列内容高度倍数必须**两个方向都能拖**。
+ *
+ * 这是 2026-09-17 用户报的「拖拽改变不了卡片大小」的根因：倍数被夹在 ≤ 1，
+ * 而列内容默认就铺满列高，于是「列里只剩一张卡」时底部把手往下拖是空动作，
+ * 卡片只能变小、再也拖不回去。> 1 是合法状态（内容高过列，由 main 滚动兜住）。
+ */
+test('setColumnFill：向下能变大（> 1 不被夹回 1），向上留 15% 下限', () => {
+	const l = defaultLayout();
+
+	const taller = setColumnFill(l, 0, 1.4);
+	assert.equal(taller.colFill[0], 1.4, '> 1 必须原样保留，否则底部把手是单向的');
+	assert.equal(taller.colFill[1], 1, '另一列不该被带上');
+
+	assert.equal(setColumnFill(l, 0, 0.05).colFill[0], 0.15);
+	assert.equal(setColumnFill(l, 0, 99).colFill[0], MAX_COL_FILL, '上限要收住无穷拖拽');
+});
+
+test('外来布局的 colFill > 1：保留，不回退默认', () => {
+	const l = loadWithStored({
+		columns: defaultLayout().columns,
+		colFlex: 0.58,
+		colFill: [1.8, 0.6],
+		hidden: [],
+	});
+	assert.deepEqual(l.colFill, [1.8, 0.6]);
 });

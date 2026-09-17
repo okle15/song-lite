@@ -36,6 +36,7 @@ import {
 	type PlaybackMode,
 } from './player-events';
 import type { JSX } from 'react';
+import { TrackCover } from './TrackCover';
 import {
 	FavIcon,
 	FavOnIcon,
@@ -276,7 +277,6 @@ export function PlayerBar({ onToggleQueue }: { onToggleQueue?: () => void }) {
 	};
 
 	const progress = duration > 0 ? Math.min(1, position / duration) : 0;
-	const coverChar = track ? (track.title.trim()[0] ?? '♪') : '♪';
 
 	return (
 		<footer className="glass relative shrink-0 border-t border-border">
@@ -304,12 +304,22 @@ export function PlayerBar({ onToggleQueue }: { onToggleQueue?: () => void }) {
 			<div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-3 py-2 md:grid-cols-[minmax(170px,1fr)_minmax(300px,2fr)_minmax(190px,1fr)] md:gap-4 md:px-5 md:py-2.5">
 				{/* ── 左：封面 + 曲目信息 + 收藏 ── */}
 				<div className="flex min-w-0 items-center gap-2.5 md:gap-3">
-					<div
-						className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand to-brand-3 text-sm font-bold text-white shadow-sm md:h-11 md:w-11 ${isPlaying ? 'animate-pulse' : ''}`}
-						aria-hidden
-					>
-						{coverChar}
-					</div>
+					{track ? (
+						<TrackCover
+							id={track.id}
+							title={track.title}
+							hasCover={track.hasCover}
+							className={`h-10 w-10 shrink-0 rounded-xl shadow-sm md:h-11 md:w-11 ${isPlaying ? 'animate-pulse' : ''}`}
+							charClassName="text-sm font-bold text-white"
+						/>
+					) : (
+						<div
+							className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-brand to-brand-3 text-sm font-bold text-white shadow-sm md:h-11 md:w-11"
+							aria-hidden
+						>
+							♪
+						</div>
+					)}
 					<div className="min-w-0 flex-1">
 						<div className="truncate text-xs font-semibold md:text-sm" title={track?.title}>
 							{track ? track.title : '还没有在播放'}

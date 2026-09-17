@@ -81,7 +81,14 @@ function mmss(sec: number): string {
 /** 各 BFF 路由返回的 data 形状（只取用得到的字段）。 */
 type SearchData = {
 	total: number;
-	songs: { id: string; title: string; artist: string; album: string; durationSec: number }[];
+	songs: {
+		id: string;
+		title: string;
+		artist: string;
+		album: string;
+		durationSec: number;
+		tags: string[];
+	}[];
 };
 
 type PlayData = { state: string; currentTrack: { title: string; artist: string } | null };
@@ -113,11 +120,13 @@ export function createTools(ctx: ToolRunContext) {
 	return {
 		search_library: tool({
 			description:
-				'在本地曲库里按关键词检索曲目，返回曲名、歌手、时长和 trackId。' +
-				'关键词会匹配曲名 / 歌手 / 专辑。查询词留空则返回整库（用于「有哪些歌」这类问题）。' +
+				'在本地曲库里按关键词检索曲目，返回曲名、歌手、时长、风格标签和 trackId。' +
+				'关键词会匹配曲名 / 歌手 / 专辑，也会匹配**风格标签**——所以「来点舒缓的」' +
+				'「有没有摇滚」这类请求也用本工具（标签是 pop / folk / ballad / dance 这样的英文词）。' +
+				'查询词留空则返回整库（用于「有哪些歌」这类问题）。' +
 				'想播放任何歌曲前，必须先用本工具拿到 trackId。',
 			inputSchema: z.object({
-				query: z.string().describe('检索关键词，如歌手名或曲名片段。留空表示列出整库。'),
+				query: z.string().describe('检索关键词，如歌手名、曲名片段或风格标签。留空表示列出整库。'),
 				limit: z.number().int().min(1).max(20).optional().describe('最多返回几条，1-20，默认 10。'),
 			}),
 			execute: ({ query, limit }, { abortSignal }) =>
@@ -137,9 +146,12 @@ export function createTools(ctx: ToolRunContext) {
 					if (total === 0) {
 						return { ok: true, text: q ? `曲库里没有匹配「${q}」的曲目。` : '曲库是空的。' };
 					}
-					const lines = songs.map(
-						(s, i) => `${i + 1}. ${s.title} — ${s.artist}（${mmss(s.durationSec)}，id=${s.id}）`,
-					);
+					// 把标签一起给模型：它既能回答「这首什么风格」，也能在用户说
+					// 「这首不是摇滚」时知道该用 set_track_tags 改哪个字段。
+					const lines = songs.map((s, i) => {
+						const tagText = s.tags?.length ? `，标签：${s.tags.join('/')}` : '';
+						return `${i + 1}. ${s.title} — ${s.artist}（${mmss(s.durationSec)}，id=${s.id}${tagText}）`;
+					});
 					return {
 						ok: true,
 						text: `命中 ${total} 首，列出前 ${songs.length} 首：\n${lines.join('\n')}`,
@@ -156,7 +168,9 @@ export function createTools(ctx: ToolRunContext) {
 				trackId: z
 					.string()
 					.min(1)
-					.describe('曲目 id，形如 track-3。必须来自 search_library 的返回值，不要自己编。'),
+					.describe(
+						'曲目 id，就是曲库里的文件名（如「奢香夫人 - 凤凰传奇.mp3」）。必须来自 search_library 的返回值，不要自己编。',
+					),
 			}),
 			execute: ({ trackId }, { abortSignal }) =>
 				settled(async () => {
@@ -296,6 +310,53 @@ export function createTools(ctx: ToolRunContext) {
 					return {
 						ok: true,
 						text: r.data?.removed ? `已忘掉「${normalized}」。` : `本来就没记过「${normalized}」。`,
+					};
+				}),
+			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+		}),
+
+		/**
+		 * 曲目风格的**用户重设入口**。它和 `remember_preference` 是同一类东西 ——
+		 * 都改变「服务端对这个世界的认知」，而不是当下的播放状态。
+		 *
+		 * 优先级由服务端保证而不是这里：路由写进去的 `source` 恒为 `'user'`，
+		 * 而 AI 批量打标遇到用户设过的行会跳过（见 `server/library/tags.ts`）。
+		 * 所以工具这边不需要判断「该不该覆盖」——**入口本身就决定了优先级**。
+		 */
+		set_track_tags: tool({
+			description:
+				'重设某首歌的风格标签。用户对曲目风格的判断**优先于**系统自动打的标签，' +
+				'且不会被之后的自动打标覆盖。用于「这首其实是民谣」「把奢香夫人标成民族风」' +
+				'「别把它当摇滚」这类明确要求。' +
+				'需要先用 search_library 拿到 trackId，并从它的返回值里看清这首歌当前的标签。',
+			inputSchema: z.object({
+				trackId: z
+					.string()
+					.min(1)
+					.describe('曲目 id，来自 search_library 的返回值（形如「奢香夫人 - 凤凰传奇.mp3」）。'),
+				tags: z
+					.string()
+					.describe(
+						'新的标签，用逗号分隔，如「民谣,抒情」或「rock」。会**整体替换**这首歌原有的标签，所以要把想保留的也写进去。',
+					),
+			}),
+			execute: ({ trackId, tags }, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<{ tag: { tags: string[] } }>(
+						ctx,
+						'/api/library/tags',
+						{
+							method: 'POST',
+							headers: JSON_HEADERS,
+							body: JSON.stringify({ trackId, tags }),
+						},
+						abortSignal,
+					);
+					if (!r.ok) return { ok: false, text: `更新标签失败：${r.message}` };
+					const now = r.data?.tag?.tags ?? [];
+					return {
+						ok: true,
+						text: now.length ? `已把这首歌的标签设为：${now.join('、')}` : '已清空这首歌的标签。',
 					};
 				}),
 			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,

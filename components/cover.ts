@@ -21,3 +21,14 @@ export function gradientFor(id: string): string {
 	for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
 	return COVER_GRADIENTS[h % COVER_GRADIENTS.length];
 }
+
+/**
+ * 内嵌封面端点 URL，给 `<img src>` 直接用（见 `app/api/library/cover/route.ts`）。
+ *
+ * 必须整串编码：`Song.id` 就是曲库内相对路径，会带斜杠与中文
+ * （如 `专辑/全是爱 - 凤凰传奇.mp3`）——不编码的话斜杠会被当成 URL 路径分隔符，
+ * 中文也可能被中间层按各自的方式处理。无封面时服务端 404，那是正常分支不是错误。
+ */
+export function coverUrl(id: string): string {
+	return `/api/library/cover?trackId=${encodeURIComponent(id)}`;
+}

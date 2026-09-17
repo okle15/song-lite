@@ -33,6 +33,7 @@
     "components/**/*.ts",
     "components/**/*.tsx",
     "contract/**/*.ts",
+    "scripts/**/*.mts",
     "server/**/*.ts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"

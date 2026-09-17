@@ -26,12 +26,22 @@ type Props = {
 	 * 否则用户在 0.62 处按一下方向键会先跳回内部的 0.5 初值。
 	 */
 	currentRatio?: number;
-	/** 附加类名（如在窄屏隐藏分隔条：单列布局下拉伸没有意义）。 */
+	/** 附加类名（如把「整列内容高度」那条限制在宽屏：窄屏没有列高这个概念）。 */
 	className?: string;
 };
 
 /** 键盘微调步长（占容器比例）。 */
 const KEY_STEP = 0.03;
+
+/**
+ * 分隔条厚度（px）——**单一出处**。
+ *
+ * 组件用它定自己的尺寸，布局侧（`app/home-client.tsx`）也要用它把卡片高度里
+ * 被分隔条吃掉的那几像素扣出来。两边各写一遍的话，一列卡片的百分比之和是 100%、
+ * 却还要再塞进 N 条 8px 的分隔条，整列必然溢出：最后一个卡片的底边连同底部分隔条
+ * 会被推到可视区之外（实测一列 3 张卡时，那条分隔条正好落在播放条底下，完全拖不到）。
+ */
+export const SPLIT_HANDLE_PX = 8;
 
 export function SplitHandle({
 	orientation,
@@ -133,10 +143,11 @@ export function SplitHandle({
 				// before 伪元素扩大热区：分隔条本体只有 8px，拖动目标太窄容易脱手
 				"group relative shrink-0 touch-none select-none before:absolute before:content-['']",
 				isH
-					? 'h-2 cursor-row-resize before:-inset-y-1.5 before:inset-x-0'
-					: 'w-2 cursor-col-resize before:-inset-x-1.5 before:inset-y-0',
+					? 'cursor-row-resize before:-inset-y-1.5 before:inset-x-0'
+					: 'cursor-col-resize before:-inset-x-1.5 before:inset-y-0',
 				className,
 			].join(' ')}
+			style={isH ? { height: SPLIT_HANDLE_PX } : { width: SPLIT_HANDLE_PX }}
 			title={`拖动调整${isH ? '高度' : '宽度'}（或用方向键）`}
 		>
 			{/* 视觉握把：静止时低亮度提示「这里可以拖」，hover / 聚焦 / 拖动时点亮 */}

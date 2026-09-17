@@ -35,14 +35,25 @@ export type Pane = {
 
 export type ColumnIndex = 0 | 1;
 
+/**
+ * 列内容高度相对**列高**的倍数上限。
+ *
+ * 为什么必须能大于 1：列内容默认就铺满列高（=1），底部把手若卡在 1，
+ * 往下拖就完全没有余量——「列里只剩一张卡」时用户只能把卡片拖小，
+ * 再也拖不回去（2026-09-17 实测：单卡列向下拖 100px 零反应）。
+ * > 1 表示内容高过列，多出来的部分由 `main` 滚动兜住，等于「把卡片拉高」。
+ */
+export const MAX_COL_FILL = 3;
+
 export type Layout = {
 	columns: [Pane[], Pane[]];
 	/** 左列宽度占比（0–1）。 */
 	colFlex: number;
 	/**
-	 * 每列内容高度占列高的比例（0.15–1，默认 1）。
-	 * 列内最后一张卡的底部把手调整的就是它——允许列下方留白，
-	 * 这样「列里只剩一张卡」时也依然可以随意调高度。
+	 * 每列内容高度相对列高的倍数（0.15–`MAX_COL_FILL`，默认 1）。
+	 * 列内最后一张卡的底部把手调整的就是它，两个方向都要能用：
+	 *  < 1 → 列下方留白（整列卡片变矮）；
+	 *  > 1 → 内容高过列（整列卡片变高，页面滚动）。
 	 */
 	colFill: [number, number];
 	/** 被隐藏的卡片（可从布局菜单恢复）。 */
@@ -154,13 +165,17 @@ function sanitizeLayout(value: unknown): Layout | null {
 	const hidden = v.hidden.filter(
 		(c): c is CardId => ALL_CARD_IDS.includes(c) && !seenCards.has(c),
 	);
-	// colFill 旧版本布局可能没有：缺省视为铺满（1）
+	// colFill 旧版本布局可能没有：缺省视为铺满（1）。
+	// 上限用 MAX_COL_FILL 而不是 1——> 1 是「卡片比列还高」的合法状态。
 	const rawFill = (v as { colFill?: unknown }).colFill;
 	const colFill: [number, number] = [1, 1];
 	if (Array.isArray(rawFill)) {
 		for (const i of [0, 1] as ColumnIndex[]) {
 			const n = rawFill[i];
-			colFill[i] = typeof n === 'number' && Number.isFinite(n) ? Math.min(1, Math.max(0.15, n)) : 1;
+			colFill[i] =
+				typeof n === 'number' && Number.isFinite(n)
+					? Math.min(MAX_COL_FILL, Math.max(0.15, n))
+					: 1;
 		}
 	}
 	return { columns, colFlex: v.colFlex, colFill, hidden };
@@ -238,11 +253,12 @@ export function columnTotalFlex(layout: Layout, col: ColumnIndex): number {
 }
 
 /**
- * 调整某列内容高度占列高的比例（0.15–1）。
- * 这是「列里只剩一张卡」时唯一的高度入口：下方留白也算布局的一部分。
+ * 调整某列内容高度相对列高的倍数（0.15–`MAX_COL_FILL`）。
+ * 这是「列里只剩一张卡」时唯一的高度入口：< 1 时列下方留白，
+ * > 1 时内容溢出列高（由 main 滚动兜住）。
  */
 export function setColumnFill(layout: Layout, col: ColumnIndex, fill: number): Layout {
-	const clamped = Math.min(1, Math.max(0.15, fill));
+	const clamped = Math.min(MAX_COL_FILL, Math.max(0.15, fill));
 	const colFill: [number, number] = [...layout.colFill] as [number, number];
 	colFill[col] = clamped;
 	return { ...layout, colFill };

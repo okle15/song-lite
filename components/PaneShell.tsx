@@ -33,8 +33,13 @@ type Props = {
 	mergeTargets: Pane[];
 	/** 标题栏副标题（如歌词卡显示当前曲目） */
 	subtitle?: ReactNode;
-	/** 卡片高度占列高的比例（宽屏用；由 colFill × flex 权重算出） */
-	heightPct?: number;
+	/**
+	 * 卡片高度的 CSS 长度（宽屏用）。由调用方按「colFill × 权重占比」算好，
+	 * **并扣掉分隔条占走的那几像素**再传进来——见 `SPLIT_HANDLE_PX` 的注释。
+	 * 窄屏不传：那时高度由 CSS 按权重算（`--pane-h` 的百分比在内容高度的列里
+	 * 解析不出来，这正是窄屏曾经完全没有拖拽的原因）。
+	 */
+	paneHeight?: string;
 	/** 当前是否为 A/D 选中（外溢光晕 + 键位提示） */
 	focused?: boolean;
 	onFocus?: () => void;
@@ -59,7 +64,7 @@ export function PaneShell({
 	canMergeDown,
 	mergeTargets,
 	subtitle,
-	heightPct,
+	paneHeight,
 	focused,
 	onFocus,
 	onActive,
@@ -151,7 +156,7 @@ export function PaneShell({
 			className="pane-item group/pane flex min-h-0 min-w-0 flex-col"
 			style={{
 				'--pane-flex': pane.flex,
-				...(heightPct !== undefined ? { '--pane-h': `${heightPct * 100}%` } : {}),
+				...(paneHeight !== undefined ? { '--pane-h': paneHeight } : {}),
 			} as React.CSSProperties}
 		>
 			<div

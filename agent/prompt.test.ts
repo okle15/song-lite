@@ -16,11 +16,19 @@ import { buildSystemPrompt } from './prompt';
 
 const snap = (over: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
 	state: 'playing',
-	currentTrack: { id: 'track-1', title: '荷塘月色', artist: '凤凰传奇', album: '最炫民族风' },
+	// id 形态取真实值（曲库内相对路径），不用已经退休的 `track-N`
+	// —— fixture 用旧形态会让人以为 id 还是编号。
+	currentTrack: {
+		id: '荷塘月色 - 凤凰传奇.mp3',
+		title: '荷塘月色',
+		artist: '凤凰传奇',
+		album: '最炫民族风',
+		hasCover: true,
+	},
 	positionSec: 42,
 	queueSize: 6,
 	queueIndex: 2,
-	queue: [{ id: 'track-1', title: '荷塘月色', artist: '凤凰传奇' }],
+	queue: [{ id: '荷塘月色 - 凤凰传奇.mp3', title: '荷塘月色', artist: '凤凰传奇' }],
 	...over,
 });
 

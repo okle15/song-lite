@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test": "tsx --test \"agent/**/*.test.ts\" \"components/**/*.test.ts\" \"contract/**/*.test.ts\" \"server/**/*.test.ts\"",
-    "smoke:api": "node scripts/api-smoke.mjs"
+    "smoke:api": "node scripts/api-smoke.mjs",
+    "tag:library": "tsx --env-file-if-exists=.env.local scripts/auto-tag.mts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.48",

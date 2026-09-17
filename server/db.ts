@@ -13,14 +13,20 @@
  * `.gitignore` 已忽略。刻意**不开 WAL**：默认 journal 模式下落盘只有单个
  * `.db` 文件，不留 `-wal` / `-shm` 尾巴——「删一个文件就干净」是有意保留的性质。
  *
- * ── 表结构（2026-09-16 加 messages / preferences，见 BLUEPRINT 阶段 3）────
+ * ── 表结构（2026-09-17 加 track_tags）──────────────────────────────────
  *   plays        播放历史，一行 = 一次「开始播放某首歌」
  *   messages     对话历史，一行 = 一条 UI 消息（user 或 assistant）
  *   preferences  ⑥ 记忆，一行 = 一条关于用户的持久偏好（key 唯一，再记即覆盖）
+ *   track_tags   曲目风格标签，一行 = 一首歌（track_id 唯一，指 `Song.id`）
+ *                `source` 记这行是谁写的：'ai' 打底 / 'user' 覆盖；
+ *                **AI 不会覆盖用户已设的标签**（见 `server/library/tags.ts`）。
+ *                为什么它必须落库：ID3 里那个 genre 字段本身是不可信的
+ *                （本曲库 6 首中文流行全被标成 blues），而「这首算什么风格」
+ *                既需要模型判断、又需要尊重用户的主观偏好 —— 两者都不在文件里。
  *
- * 三张表的**失败语义不同**，不是不一致而是有意：
+ * 四张表的**失败语义不同**，不是不一致而是有意：
  *   plays / messages 是旁路记录，写失败只 log 不抛（不该打断播放或对话）；
- *   preferences 是 agent 对用户的**承诺**（它说了「记住了」就该真记住），
+ *   preferences / track_tags 是 agent 对用户的**承诺**（它说了「记住了」就该真记住），
  *   所以写失败要抛到路由 → 变成工具失败 → 模型据实告诉用户。
  *
  * 之后要加表（歌单 / 标签 / 电台编排…）就往 `migrate()` 里追加一条
@@ -67,6 +73,13 @@ function migrate(db: DatabaseSync): void {
 		CREATE TABLE IF NOT EXISTS preferences (
 			key        TEXT PRIMARY KEY,
 			value      TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS track_tags (
+			track_id   TEXT PRIMARY KEY,
+			tags       TEXT NOT NULL,
+			source     TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);
 	`);

@@ -24,18 +24,21 @@ npm run build && npm start -- -p 3100
 
 ## 功能边界
 
-**有**：曲库浏览与搜索、点击播放、进度拖动、上下首、播放队列、播放模式（顺序 / 列表循环 /
-单曲循环 / 随机）、歌词（含全屏沉浸页）、音量 / 静音、背景主题、可拖拽可合并的多面板布局、
-全局快捷键、播放历史落库。
+**有**：曲库浏览与搜索（**含按风格标签搜**）、点击播放、进度拖动、上下首、播放队列、
+播放模式（顺序 / 列表循环 / 单曲循环 / 随机）、**真实封面**（读文件内嵌 `APIC`，
+无则回落「首字 + 渐变」）、歌词（含全屏沉浸页，**优先读文件内嵌 `USLT`**）、
+音量 / 静音、背景主题、可拖拽可合并的多面板布局（宽屏两列：调列宽 / 卡片高度 /
+整列内容倍数；窄屏单列：同列卡片之间照常可拖）、全局快捷键、播放历史落库。
 
 **没有**（曾有过，2026-09-15 随最简化删除）：电台、偏好设置、语音输入、
-MV 视频播放、统计概览、LLM 打标。要恢复它们，看 git 历史（`RADIO.md` 一并删除）。
+MV 视频播放、统计概览。**AI 打标回来了，但换了形态**：不再依赖不可信的 ID3 `TCON`，
+改由 `track_tags` 表承载（AI 打底 + 用户覆盖）——重跑打标**不会覆盖用户手改过的标签**。
 
 **Agent**：对话是布局系统里的一张普通卡（`chat`，⌘K 唤起），协议交给 Vercel AI SDK
-（`/api/agent`）。当前有 **7 个工具**（5 个播放 + 2 个记忆）、**会话历史**（跨刷新保留，
-发送前裁掉历史轮的工具轨迹）与**记忆**（`remember` / `forget_preference` 记下的长期偏好
-跨对话注入系统提示词）。观测 / 触发器未做——加什么、加在哪、凭什么这么判断，全在
-[BLUEPRINT.md](./BLUEPRINT.md)。
+（`/api/agent`）。当前有 **8 个工具**（5 个播放 + 2 个记忆 + 1 个曲目标签）、**会话历史**
+（跨刷新保留，发送前裁掉历史轮的工具轨迹）与**记忆**（`remember` / `forget_preference`
+记下的长期偏好跨对话注入系统提示词）。观测 / 触发器未做——加什么、加在哪、凭什么这么判断，
+全在 [BLUEPRINT.md](./BLUEPRINT.md)。
 
 ---
 
@@ -60,13 +63,15 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 
 ---
 
-## API 一览（12 个）
+## API 一览（14 个）
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
-| GET | `/api/library/search?q=&limit=` | 曲库检索（`q` 空 = 整库），标题/歌手/专辑子串匹配 |
+| GET | `/api/library/search?q=&limit=` | 曲库检索（`q` 空 = 整库），标题/歌手/专辑子串匹配，**并匹配标签** |
 | GET | `/api/library/stream?trackId=` | 音频字节流，支持 Range（seek 靠它） |
-| GET | `/api/library/lyrics?trackId=&raw=` | LRC 歌词；`raw=1` 返回 text/plain |
+| GET | `/api/library/lyrics?trackId=&raw=` | LRC 歌词，**优先读音频内嵌（ID3 USLT）、`.lrc` 兜底**；`raw=1` 返回 text/plain |
+| GET | `/api/library/cover?trackId=` | 内嵌封面（ID3 APIC）的**原始图片字节**；无封面 → 404，前端据此回落渐变 |
+| GET/POST/DELETE | `/api/library/tags` | **曲目风格标签**。GET 列出（`?trackId=` 取单曲）；POST `{trackId, tags}` 重设 —— **走这条 HTTP 路径就等于「人在说话」→ `source='user'`，无条件覆盖 AI**；DELETE `?trackId=` 清掉。agent 的 `set_track_tags` 工具走这里 |
 | GET | `/api/player/events` | **SSE**，播放状态的唯一推送源 |
 | GET/POST | `/api/player/play` | GET 轮询当前状态；POST `{trackId}` 点播 |
 | POST | `/api/player/pause` · `/resume` | 暂停 / 续播（无播放中 → 409） |
@@ -88,19 +93,27 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 进程内 memo。真相永远在文件系统上，再存一份到 SQLite 只会引入
 「表里的行和盘上的文件对不上」这类问题。
 
-**数据库只存扫描不出来的东西** —— 播放历史、对话历史与偏好：
+**数据库只存扫描不出来的东西** —— 播放历史、对话历史、偏好与**曲目风格标签**：
 
 ```
 data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
   plays(id, track_id, title, artist, started_at)
   messages(id, role, parts, created_at)      -- 对话历史；id = 前端消息 id，upsert 天然幂等
   preferences(key, value, updated_at)        -- Agent 的长期记忆；key 唯一 = 同一条偏好
+  track_tags(track_id, tags, source, updated_at)  -- 风格标签；track_id 唯一，source ∈ {ai, user}
 ```
 
 - 建表语句**只在 `server/db.ts`** 出现。加表就往 `migrate()` 里追加一条。
-- 三张表的**失败语义不同，且是有意的**：`plays` / `messages` 是流水，写失败只记日志
-  （不该打断播放或对话）；`preferences` 是 agent 对用户的**承诺**（它说了「记住了」），
-  写失败必须让模型知道——否则用户下次发现它又忘了，却找不到任何线索。
+- 四张表的**失败语义不同，且是有意的**：`plays` / `messages` 是流水，写失败只记日志
+  （不该打断播放或对话）；`preferences` / `track_tags` 是 agent 对用户的**承诺**
+  （它说了「记住了」「改好了」），写失败必须让模型知道——否则用户下次发现它又忘了，
+  却找不到任何线索。
+- **`track_tags` 是「这首歌算什么风格」的唯一出处**：ID3 的 `TCON` 在本曲库全被误标
+  （6 首中文流行全标成 `blues`），所以风格一律不信文件、只看这张表。
+  两条写入路径，**谁说了算由来源决定**：`npm run tag:library`（AI 批量打底，
+  `source='ai'`）与 `POST /api/library/tags`（用户重设，`source='user'`）——
+  **`ai` 永不覆盖已有的 `user`**，判定在 `server/library/tags.ts`；
+  归一化在 `contract/track-tags.ts`，工具侧与存储侧共用同一份。
 - `messages` 存的是消息 **parts 全文（含工具轨迹）**，因为刷新页面时轨迹卡片要能原样恢复；
   而送给模型的上下文由 `agent/run.ts` 在**发送前**裁剪（`pruneMessages`）。存储存全量、
   发送才裁剪，两个目标才能同时成立——合成一步必然牺牲一个。

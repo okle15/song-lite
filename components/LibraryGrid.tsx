@@ -6,8 +6,9 @@
  * ensureQueue 后切换曲目，SSE 推送回来驱动播放器，前端无需手动维护队列。
  *
  * 设计要点：
- *  - 封面用「标题首字 + 渐变」而非真实图：库内音频没有封面资源，按 id 稳定 hash
- *    到一组渐变，保证同一首歌每次进来颜色一致（不稳定的话会显得像 bug）。
+ *  - 封面走 `<TrackCover>`：有内嵌封面就显示真图（`/api/library/cover`），没有才回落到
+ *    「标题首字 + 渐变」。`hasCover` 由本接口的响应直接给出，所以无封面的曲目
+ *    不会先发一次注定 404 的探测请求。
  *  - hover 才浮出播放按钮（FAB），静态时不遮挡封面。
  *  - 当前播放的卡片常驻高亮 + 音波，让用户知道"正在播这首"。
  */
@@ -16,7 +17,7 @@ import { useEffect, useRef, useState } from 'react';
 import { usePlayerSnapshot } from './PlayerProvider';
 import { fmtTime } from './player-events';
 import { useEscapeToClose } from './use-escape-to-close';
-import { gradientFor } from '@/components/cover';
+import { TrackCover } from './TrackCover';
 import { CloseIcon, LibraryIcon, PlayIcon, SearchIcon } from './icons';
 
 type Song = {
@@ -25,6 +26,8 @@ type Song = {
 	artist: string;
 	album?: string;
 	durationSec?: number;
+	/** 有没有内嵌封面（服务端扫描产物，见 `server/library/scanner.ts`）。 */
+	hasCover: boolean;
 };
 
 /** 播放中的均衡器动画（复用 globals.css 的 eq keyframes）。 */
@@ -179,13 +182,14 @@ export function LibraryGrid() {
 												aria-current={isCurrent ? 'true' : undefined}
 												className={`group text-left transition ${isCurrent ? '' : 'hover:-translate-y-0.5'}`}
 											>
-												<div
-													className={`relative aspect-square overflow-hidden rounded-xl bg-gradient-to-br ${gradientFor(song.id)} shadow-sm`}
-												>
-													{/* 首字封面 */}
-													<span className="absolute inset-0 flex items-center justify-center font-display text-4xl text-white/90">
-														{song.title.slice(0, 1)}
-													</span>
+												<div className="relative aspect-square overflow-hidden rounded-xl shadow-sm">
+													{/* 封面：有内嵌封面读真图，否则回落到首字渐变 */}
+													<TrackCover
+														id={song.id}
+														title={song.title}
+														hasCover={song.hasCover}
+														className="h-full w-full"
+													/>
 													{/* hover 悬浮播放 FAB */}
 													<span
 														className={`absolute inset-0 flex items-center justify-center bg-black/35 transition-opacity ${

@@ -35,8 +35,12 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
 ## 数据与持久化
 
 - **曲库不落库**：曲目来自对 `MUSIC_DIR` 的实时扫描（进程内 memo），真相在文件系统上。
-- **数据库只存扫描不出来的东西**：`plays`（播放历史）、`messages`（对话历史）与
-  `preferences`（⑥ 记忆，一行 = 一条长期偏好）。
+- **数据库只存扫描不出来的东西**：`plays`（播放历史）、`messages`（对话历史）、
+  `preferences`（⑥ 记忆，一行 = 一条长期偏好）与 `track_tags`（曲目风格，一行 = 一首歌）。
+- **风格标签的优先级由「入口」决定，不由调用方声明**：走 `POST /api/library/tags`
+  （人或 agent 在说话）= `source='user'`，无条件覆盖；AI 批量打标走 `npm run tag:library`
+  （`scripts/auto-tag.mts`）直连 `server/library/tags.ts` 写 `source='ai'`，
+  **永不覆盖已有的 `user`**。拆词 / 去重 / 排序规则在 `contract/track-tags.ts`，不许另写一份。
 - **`messages.id` 就是前端消息 id**，靠 `ON CONFLICT(id) DO UPDATE` 实现幂等；顺序锚在 `rowid`
   ——别用 `created_at` 排序（一轮的 user / assistant 会在同一毫秒落库，撞车）。
 - **`messages` 存 parts 全量（含工具轨迹），裁剪只发生在发送前**（`agent/run.ts` 的 `pruneMessages`）。
@@ -44,9 +48,10 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
 - **`preferences` 用 `key` 唯一性定义「什么算同一条偏好」**：同 key 覆盖，不追加（否则用户说五遍
   「不喜欢摇滚」会记五条）。归一化规则（大小写 / 空格 / 连字符）在 `contract/preference.ts`，
   **工具侧与存储侧共用同一份**，不许另写一份。
-- **三张表的失败语义不同，且是有意的**：`plays` / `messages` 是**流水**，写失败只记日志（不该打断
-  播放或对话）；`preferences` 是 agent 对用户的**承诺**（它已经说了「好，我记住了」），写失败必须
-  抛到路由 → 变成工具失败 → 模型据实告知。**加新表时先问一句：它失败时，谁需要知道？**
+- **四张表的失败语义不同，且是有意的**：`plays` / `messages` 是**流水**，写失败只记日志（不该打断
+  播放或对话）；`preferences` / `track_tags` 是 agent 对用户的**承诺**（它已经说了「好，我记住了」
+  /「改好了」），写失败必须抛到路由 → 变成工具失败 → 模型据实告知。
+  **加新表时先问一句：它失败时，谁需要知道？**
 - **偏好注入只读最近 30 条**（`MAX_INJECTED_PREFERENCES`），不删任何行；**不做自动过期**——
   时效语义（「最近别放摇滚」）交给 `value` 的自然语言承载。加一个 `expires_at` 却不写任何检查
   它的代码，只会让人以为系统在做过期判断。
@@ -76,8 +81,17 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
   可能拿到陈旧或伪造的响应。curl 加 `--noproxy '*'`，统一用 `127.0.0.1` 而非 `localhost`。
 - **长驻进程（`next start` / 无头浏览器）必须 `run_in_background`**：用 `cmd &` 起的进程会随该次
   调用结束被回收，表现为「刚探测到端口在听、几秒后全变 `ERR_CONNECTION_REFUSED`」。
-- **无头浏览器起不来时先查「用户是不是开着浏览器」**：已有常驻实例时新起的 headless 会被接管后秒退。
-  **别去杀它**——那是用户自己的浏览器。此路不通时改用文本化断言或纯函数单测。
+- **无头浏览器起不来时先分清是哪一个浏览器**：系统装的 Chrome / Edge 在本沙箱起不来
+  （`--headless=new` 会因 updater 命名管道被拒而 0 字节退出）；且**用户自己开着浏览器时，
+  新起的实例会被接管后秒退**——别去杀它。**换 Playwright 自带的 Chromium 就能起**
+  （2026-09-17 实测，系统 Chrome 同参数仍然失败）：`playwright-core` 装在隔离工作区
+  `~/.workbuddy/binaries/node/workspace`，`executablePath` 指
+  `~/AppData/Local/ms-playwright/chromium-1187/chrome-win/chrome.exe`，
+  配 `--no-sandbox --no-proxy-server`，页面一律用 `127.0.0.1`。
+- **拖拽类交互必须真拖，截图和单测都覆盖不到**：用 `page.mouse.down/move/up` 走完整
+  pointer 序列，并**穷举「每个可见控件 × 两个方向」**——只测一个方向看不出单向死区
+  （BLUEPRINT §7 的「死控件」两条就是这么漏掉的）。顺手在控件中心做
+  `document.elementFromPoint()` 命中测试，一眼看出它是不是被别的元素盖住。
 - **无头浏览器的 HTTP 缓存也会骗人**：即使服务已重启，旧 profile 缓存的 runtime 仍指向旧 chunk 名。
   换新 `--user-data-dir` 再验一次，别急着怀疑代码。
 

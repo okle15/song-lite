@@ -67,6 +67,8 @@ export function getSnapshot(): PlayerSnapshot {
 					title: currentTrack.title,
 					artist: currentTrack.artist,
 					album: currentTrack.album,
+					// 只带布尔不带封面字节（见 contract/player.ts 的说明）。
+					hasCover: currentTrack.hasCover,
 				}
 			: null,
 		positionSec,

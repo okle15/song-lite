@@ -21,7 +21,18 @@ export type QueueItem = {
 /** 推给前端的精简快照（含完整 queue 数组供队列面板显示）。 */
 export type PlayerSnapshot = {
 	state: 'stopped' | 'playing' | 'paused';
-	currentTrack: { id: string; title: string; artist: string; album: string } | null;
+	/**
+	 * 当前曲目。`hasCover` 是唯一一个「不是给人读的」字段：前端拿它决定
+	 * 「试不试真实封面」，缺了就只能盲发一次注定 404 的请求
+	 * （见 `components/TrackCover.tsx`）。带上传送量是一个布尔，可以忽略。
+	 */
+	currentTrack: {
+		id: string;
+		title: string;
+		artist: string;
+		album: string;
+		hasCover: boolean;
+	} | null;
 	positionSec: number;
 	queueSize: number;
 	queueIndex: number;
