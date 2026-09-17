@@ -219,6 +219,10 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 			<div
 				ref={colRef}
 				className={`layout-col layout-col--${col === 0 ? 'left' : 'right'} flex flex-col`}
+				// 列级下发 colFill：宽屏走 --pane-h（JS 已把 colFill 算进去），
+				// 窄屏走 --col-fill（CSS 用它乘权重 × 40dvh）。
+				// 窄屏不乘的话，底部分隔条调 colFill 就是个空动作。
+				style={{ '--col-fill': fill } as React.CSSProperties}
 			>
 				{panes.map((pane, i) => (
 					<Fragment key={pane.id}>
@@ -254,16 +258,16 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 								label={`调整「${paneLabel(panes[i + 1])}」与上方面板的高度`}
 							/>
 						) : (
-							/* 最后一张卡的底部：调整整列内容高度倍数（单卡列唯一的高度入口）。
-							   只有宽屏有它：「列高」在那里才存在，窄屏的列是内容高度，
-							   没有可以按比例缩放的基准，留白/溢出都无从谈起。 */
+							/* 最后一张卡的底部：调整整列内容高度倍数（colFill）。
+							   窄屏也必须有它——「一列只剩一张卡」时（隐藏过别的卡、
+							   或把两张卡合并成标签页）这是**唯一**的高度入口，
+							   曾经它在窄屏被 hidden 掉，那列就一条分隔条都不剩。 */
 							<SplitHandle
 								key="sep-end"
 								orientation="horizontal"
 								containerRef={colRef}
 								onDelta={(deltaPx, size) => resizeColumnFill(col, deltaPx, size)}
 								label={`调整「${paneLabel(panes[i])}」的高度（列内无其它卡片时也可用）`}
-								className="hidden lg:block"
 							/>
 						)}
 					</Fragment>

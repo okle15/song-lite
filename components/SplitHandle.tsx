@@ -54,6 +54,16 @@ export function SplitHandle({
 }: Props) {
 	const draggingRef = useRef(false);
 	const lastPosRef = useRef(0);
+	/**
+	 * 按下那一刻的容器尺寸——换算增量时的**基准**。
+	 *
+	 * 为什么不能用实时尺寸做分母：拖动本身会改变容器尺寸。窄屏的列高就是
+	 * 内容高度，底条把内容拉高 100px，分母也跟着长大 100px，下一次移动
+	 * 分到的比例就变小——实测拖 4 次 100px 的跟手度是 88% → 71% → 62% → 56%，
+	 * 越拖越钝。钉住起始值后，一次拖动内的换算比例恒定。
+	 * 宽屏无副作用：那里列高由 flex 分配、拖动期间本就恒定，两者相等。
+	 */
+	const baseSizeRef = useRef(0);
 	// 记录最近一次比例，供方向键在此基础上微调
 	const lastRatioRef = useRef(0.5);
 
@@ -70,6 +80,7 @@ export function SplitHandle({
 		e.preventDefault();
 		draggingRef.current = true;
 		lastPosRef.current = isH ? e.clientY : e.clientX;
+		baseSizeRef.current = containerSize();
 		// 拖动期间禁用文本选择：仅靠 preventDefault 在部分浏览器（如 Firefox）
 		// 拦不住从分隔条带出的选区，整页文字被选中非常难看。
 		document.body.style.userSelect = 'none';
@@ -95,7 +106,8 @@ export function SplitHandle({
 		if (size <= 0) return;
 
 		if (onDelta) {
-			onDelta(delta, size);
+			// 分母用按下时的基准尺寸（见 baseSizeRef），不是此刻的 size
+			onDelta(delta, baseSizeRef.current > 0 ? baseSizeRef.current : size);
 		}
 		if (onRatio) {
 			const ratio = isH ? (e.clientY - rect.top) / size : (e.clientX - rect.left) / size;
