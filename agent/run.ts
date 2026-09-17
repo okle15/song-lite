@@ -36,8 +36,12 @@ import { createTools } from './tools';
  *
  * 模型偶尔会陷入「搜一次没满意、再搜一次」的循环。有上限时它会带着已有的信息
  * 收口，而不是把 token 烧光。
+ *
+ * **导出是给 ⑨ 观测用的**：撞到上限时它想调的工具就没机会执行，而这件事
+ * 在输出里毫无痕迹（模型只是"话没说完"）——观测要能把这一轮标出来
+ * （`summarizeSteps` 的 `truncated`），判据必须是同一个数，不能另抄一份。
  */
-const MAX_STEPS = 5;
+export const MAX_STEPS = 5;
 
 export type RunAgentOptions = {
 	/**

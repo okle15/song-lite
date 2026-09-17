@@ -13,7 +13,7 @@
  * `.gitignore` 已忽略。刻意**不开 WAL**：默认 journal 模式下落盘只有单个
  * `.db` 文件，不留 `-wal` / `-shm` 尾巴——「删一个文件就干净」是有意保留的性质。
  *
- * ── 表结构（2026-09-17 加 track_tags）──────────────────────────────────
+ * ── 表结构（2026-09-17 加 agent_turns）─────────────────────────────────
  *   plays        播放历史，一行 = 一次「开始播放某首歌」
  *   messages     对话历史，一行 = 一条 UI 消息（user 或 assistant）
  *   preferences  ⑥ 记忆，一行 = 一条关于用户的持久偏好（key 唯一，再记即覆盖）
@@ -23,9 +23,14 @@
  *                为什么它必须落库：ID3 里那个 genre 字段本身是不可信的
  *                （本曲库 6 首中文流行全被标成 blues），而「这首算什么风格」
  *                既需要模型判断、又需要尊重用户的主观偏好 —— 两者都不在文件里。
+ *   agent_turns  ⑨ 观测，一行 = **一轮对话**（不是一条消息）。`id` 就是那一轮
+ *                assistant 消息的 id，与 `messages` 表同一个主键，可直接 join。
+ *                为什么落库：⑨ 存在的意义是「事后能回答它哪次答错、慢在哪、
+ *                花了多少」——而这三件事在一轮结束的那一刻全都还在手上
+ *                （步数、工具耗时、token、有没有被截断），过后就散了。
  *
- * 四张表的**失败语义不同**，不是不一致而是有意：
- *   plays / messages 是旁路记录，写失败只 log 不抛（不该打断播放或对话）；
+ * 五张表的**失败语义不同**，不是不一致而是有意：
+ *   plays / messages / agent_turns 是旁路记录，写失败只 log 不抛（不该打断播放或对话）；
  *   preferences / track_tags 是 agent 对用户的**承诺**（它说了「记住了」就该真记住），
  *   所以写失败要抛到路由 → 变成工具失败 → 模型据实告诉用户。
  *
@@ -81,6 +86,22 @@ function migrate(db: DatabaseSync): void {
 			tags       TEXT NOT NULL,
 			source     TEXT NOT NULL,
 			updated_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS agent_turns (
+			id            TEXT PRIMARY KEY,
+			created_at    TEXT NOT NULL,
+			user_text     TEXT NOT NULL,
+			steps         INTEGER NOT NULL,
+			tool_calls    INTEGER NOT NULL,
+			tools         TEXT NOT NULL,
+			truncated     INTEGER NOT NULL,
+			aborted       INTEGER NOT NULL,
+			finish_reason TEXT,
+			ms            INTEGER NOT NULL,
+			input_tokens  INTEGER NOT NULL,
+			output_tokens INTEGER NOT NULL,
+			error         TEXT
 		);
 	`);
 }

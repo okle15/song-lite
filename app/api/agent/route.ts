@@ -18,10 +18,11 @@
  */
 import { createUIMessageStreamResponse, isTextUIPart, toUIMessageStream, type UIMessage } from 'ai';
 import { readAgentConfig } from '@/agent/provider';
-import { runAgent } from '@/agent/run';
+import { MAX_STEPS, runAgent } from '@/agent/run';
 import type { PlayerSnapshot } from '@/contract/player';
 import { appendMessages } from '@/server/agent/message-log';
 import { listPreferences } from '@/server/agent/preference-log';
+import { recordTurn, summarizeSteps, type StepLike } from '@/server/agent/turn-log';
 import { fail } from '@/server/http';
 
 export const dynamic = 'force-dynamic'; // SSE 必须动态运行，禁止静态优化
@@ -39,6 +40,8 @@ function lastUserText(messages: UIMessage[]): string {
 }
 
 export async function POST(request: Request) {
+	// ⑨ 观测的一头一尾：`startedAt` 是路由进来的墙钟，收尾在下面的 `onEnd`。
+	const startedAt = Date.now();
 	const config = readAgentConfig();
 	if (!config) {
 		return fail(
@@ -63,6 +66,13 @@ export async function POST(request: Request) {
 
 	// 工具要回调自家 API。origin 从**本次请求**推出来，而不是硬编码端口——
 	// 否则换个端口跑（3000 / 3100 / 部署后域名）工具就会打空。
+	// ⑨ 观测：这一轮的 id **就是**下面那条 assistant 消息的 id（同一个值交给
+	// `generateMessageId`）。于是「说了什么」（messages 表）与「花了多少、调了什么」
+	// （agent_turns 表）天然可 join，不需要再发明一个关联字段。
+	const turnId = crypto.randomUUID();
+	/** 本轮的错误原文。`onError` 与 `onEnd` 是两个回调，靠这个变量把前者捎给后者。 */
+	let turnError: string | null = null;
+
 	const { result, tools } = await runAgent(config, {
 		uiMessages,
 		snapshot: body.snapshot ?? null,
@@ -98,13 +108,55 @@ export async function POST(request: Request) {
 		// 于是「服务端落库的主键」与「前端下一轮回传的 id」是同一个值，幂等才真正成立。
 		// 附带好处：SDK 会把「最后一条是 assistant」的情形判为续写（重新生成），
 		// 复用同 id 覆盖而不是新增一条。
-		generateMessageId: () => crypto.randomUUID(),
-		onEnd: ({ messages }) => appendMessages(messages),
+		generateMessageId: () => turnId,
+		// ⚠️ 这里**必须 await**（`onEnd` 的返回值 SDK 是会等的）：观测那一行要么在
+		// 本轮结束时就落好，要么干脆没落——挂成后台 promise 会让「刚问完就去查观测」
+		// 时有时无，而**验证脚本会因此间歇性失败**（本轮踩过这个形状的坑：
+		// 收尾动作必须可断言）。写失败在 `recordTurn` 内部只 log，不会把对话炸掉。
+		onEnd: async ({ messages, isAborted, finishReason }) => {
+			appendMessages(messages);
+
+			// 中断时 `steps` / `usage` 可能拿不到（诚实记「已知多少算多少」，
+			// 而不是丢掉这一轮——被中断的轮次恰恰是最需要看的一类）。
+			let steps: StepLike[] = [];
+			let inputTokens = 0;
+			let outputTokens = 0;
+			try {
+				steps = (await result.steps) as unknown as StepLike[];
+			} catch {
+				// 忽略：下面按 0 步记，`aborted` 已经把这件事标出来了
+			}
+			try {
+				const usage = await result.usage;
+				inputTokens = usage.inputTokens ?? 0;
+				outputTokens = usage.outputTokens ?? 0;
+			} catch {
+				// 同上
+			}
+
+			recordTurn({
+				id: turnId,
+				userText: message,
+				...summarizeSteps(steps, {
+					maxSteps: MAX_STEPS,
+					aborted: isAborted,
+					error: turnError,
+				}),
+				finishReason: finishReason ?? null,
+				ms: Date.now() - startedAt,
+				inputTokens,
+				outputTokens,
+			});
+		},
 		// 推理过程不进气泡（实测一轮里 reasoning 的字符量能占三分之二）。
 		sendReasoning: false,
 		// 网关的错误体里通常有可读的原因（401 / 模型名写错都靠它定位），
-		// 原样带给前端比一句「执行失败」有用得多。
-		onError: (error) => (error instanceof Error ? error.message : String(error)),
+		// 原样带给前端比一句「执行失败」有用得多——同时留一份给 ⑨ 观测，
+		// 否则「哪次答错是因为网关」只能靠翻服务端日志。
+		onError: (error) => {
+			turnError = error instanceof Error ? error.message : String(error);
+			return turnError;
+		},
 	});
 
 	return createUIMessageStreamResponse({ stream });

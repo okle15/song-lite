@@ -41,7 +41,9 @@ MV 视频播放、统计概览。**AI 打标回来了，但换了形态**：不�
 另有**会话历史**（跨刷新保留，发送前裁掉历史轮的工具轨迹）与**记忆**（长期偏好跨对话注入
 系统提示词）。系统提示词的实时状态块里带着**队列窗口**（当前附近几首 + 「前 / 后 N 首略」，
 自定义队列还会写明「按什么挑的一批」）、**当前音量与播放方式**——`jump_in_queue` 的「第几首」、
-`set_volume` 的「小声点」都照它数/算。观测 / 触发器未做——
+`set_volume` 的「小声点」都照它数/算。**⑨ 观测**已接上最小版：每轮落一行
+`agent_turns`（步数 / 工具链与各自耗时 / 是否被 `MAX_STEPS` 截断 / token / 错误），
+用 `npm run turns` 看。**⑩ 触发器未做**——
 加什么、加在哪、凭什么这么判断，全在 [BLUEPRINT.md](./BLUEPRINT.md)。
 
 ---
@@ -107,13 +109,20 @@ data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
   messages(id, role, parts, created_at)      -- 对话历史；id = 前端消息 id，upsert 天然幂等
   preferences(key, value, updated_at)        -- Agent 的长期记忆；key 唯一 = 同一条偏好
   track_tags(track_id, tags, source, updated_at)  -- 风格标签；track_id 唯一，source ∈ {ai, user}
+  agent_turns(id, created_at, tools, steps, ms, input_tokens, …)  -- ⑨ 观测；一行 = 一轮对话
+                                                  -- id = 那一轮 assistant 消息的 id（与 messages 同键，可 join）
 ```
 
 - 建表语句**只在 `server/db.ts`** 出现。加表就往 `migrate()` 里追加一条。
-- 四张表的**失败语义不同，且是有意的**：`plays` / `messages` 是流水，写失败只记日志
+- 五张表的**失败语义不同，且是有意的**：`plays` / `messages` / `agent_turns` 是流水，
+  写失败只记日志
   （不该打断播放或对话）；`preferences` / `track_tags` 是 agent 对用户的**承诺**
   （它说了「记住了」「改好了」），写失败必须让模型知道——否则用户下次发现它又忘了，
   却找不到任何线索。
+- **`agent_turns` 回答的是 `messages` 答不了的那一半**：几轮工具、哪个工具慢、
+  有没有被 `MAX_STEPS` 截断、花了多少 token。一行 = 一轮（不是一条消息），
+  用 `npm run turns` 看。它是 ⑨ 观测的最小版——**没有**逐 span 的 trace，
+  也**没有**首字延迟（那要 hook 每个 chunk，属于动 ② 与 ⑧ 的冻结区）。
 - **`track_tags` 是「这首歌算什么风格」的唯一出处**：ID3 的 `TCON` 在本曲库全被误标
   （6 首中文流行全标成 `blues`），所以风格一律不信文件、只看这张表。
   两条写入路径，**谁说了算由来源决定**：`npm run tag:library`（AI 批量打底，
@@ -141,6 +150,7 @@ npx tsc --noEmit    # 全仓类型检查
 npm test            # 单测（node:test，纯函数模块）
 npm run build       # 生产构建
 BASE=http://127.0.0.1:3100 npm run smoke:api   # 接口冒烟（需先起服务）
+npm run turns       # 看最近几轮对话的观测（⑨）：步数 / 工具链 / 耗时 / token / 触顶
 ```
 
 前端回归**一律走生产模式**（`npm run build && npm start -- -p 3100`），
