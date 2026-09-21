@@ -78,7 +78,7 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 | GET | `/api/library/lyrics?trackId=&raw=` | LRC 歌词，**优先读音频内嵌（ID3 USLT）、`.lrc` 兜底**；`raw=1` 返回 text/plain |
 | GET | `/api/library/cover?trackId=` | 内嵌封面（ID3 APIC）的**原始图片字节**；无封面 → 404，前端据此回落渐变 |
 | GET/POST/DELETE | `/api/library/tags` | **曲目风格标签**。GET 列出（`?trackId=` 取单曲）；POST `{trackId, tags}` **重设**——**走这条 HTTP 路径就等于「人在说话」→ `source='user'`，无条件覆盖 AI**；DELETE `?trackId=` 清掉。agent 的 `set_track_tags` 工具走这里（它自己先读、再算增删、最后调这个重设） |
-| GET | `/api/player/events` | **SSE**，播放状态的唯一推送源（快照含队列来源、音量、播放方式） |
+| GET | `/api/player/events` | **SSE**，播放状态**推给浏览器**的唯一来源（快照含队列来源、音量、播放方式）。agent 的 ⑦ **不走它**——服务端权威的那几项在路由里现取 |
 | GET/POST | `/api/player/play` | GET 轮询当前状态；POST `{trackId}` 点播（**不在队列里就追加到队尾**，见 BLUEPRINT §7） |
 | POST | `/api/player/pause` · `/resume` | 暂停 / 续播（无播放中 → 409） |
 | POST | `/api/player/next` | 下一首；到队尾返回 `stopped` |
@@ -87,7 +87,7 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 | GET/POST | `/api/player/settings` | **音量 / 播放方式**。GET 读当前值；POST `{volume?, mode?, shuffle?}`（0–1，越界夹紧；只改给了的字段）。agent 的 `set_volume` / `set_playback_mode` 走这里 |
 | GET | `/api/history?limit=` | 播放历史，时间倒序（默认 20，上限 200） |
 | GET/POST/DELETE | `/api/preferences` | **偏好（Agent 的长期记忆）**。GET 列出；POST `{key, value}` 记住一条（同 key 覆盖）；DELETE `?key=` 忘掉一条。agent 的 `remember` / `forget_preference` 工具走的就是这里 |
-| POST | `/api/agent` | **对话端点**（SSE）。body `{messages, snapshot}`；协议是 AI SDK 的 UI 消息流（响应头 `x-vercel-ai-ui-message-stream: v1`），收尾是**裸** `data: [DONE]` |
+| POST | `/api/agent` | **对话端点**（SSE）。body `{messages, snapshot}`——`snapshot` **只用来取设备侧的四项**（音量 / 播放方式 / 随机 / 进度），曲目与队列服务端自己知道（见 `server/player/prompt-snapshot.ts`）；协议是 AI SDK 的 UI 消息流（响应头 `x-vercel-ai-ui-message-stream: v1`），收尾是**裸** `data: [DONE]` |
 
 **统一信封**：所有 JSON 路由返回 `{ code, data?, message }`。
 `code === 0` 表示成功（**不是 200**），失败时 `code` 等于 HTTP status。

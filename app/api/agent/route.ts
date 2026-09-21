@@ -24,10 +24,19 @@ import { appendMessages } from '@/server/agent/message-log';
 import { listPreferences } from '@/server/agent/preference-log';
 import { recordTurn, summarizeSteps, type StepLike } from '@/server/agent/turn-log';
 import { fail } from '@/server/http';
+import { promptSnapshot } from '@/server/player/prompt-snapshot';
 
 export const dynamic = 'force-dynamic'; // SSE 必须动态运行，禁止静态优化
 
-type Body = { messages?: UIMessage[]; snapshot?: PlayerSnapshot | null };
+/**
+ * 请求体。
+ *
+ * `snapshot` 是 `Partial`，因为服务端**只从它取设备侧的四项**（音量 / 播放方式 /
+ * 随机 / 进度）——曲目与队列这些服务端自己就知道，不该由浏览器当信使送回来
+ * （见下面 `promptSnapshot`）。浏览器目前仍寄完整的一份，那些多出来的字段是
+ * **冗余，不是依赖**：哪天前端只寄这四项，这条链路照样成立。
+ */
+type Body = { messages?: UIMessage[]; snapshot?: Partial<PlayerSnapshot> | null };
 
 /** 取最后一条用户消息的纯文本（UI 消息是 parts 数组，文字只是其中一种 part）。 */
 function lastUserText(messages: UIMessage[]): string {
@@ -75,7 +84,10 @@ export async function POST(request: Request) {
 
 	const { result, tools } = await runAgent(config, {
 		uiMessages,
-		snapshot: body.snapshot ?? null,
+		// ⑦ 的播放状态：**服务端权威的那几项在这里现取**（播放状态 / 曲目 / 队列），
+		// 只有设备侧的四项（音量 / 播放方式 / 随机 / 进度）才用浏览器随消息寄来的
+		// 那份。规则、理由与可测的那一半都在 `server/player/prompt-snapshot.ts`。
+		snapshot: promptSnapshot(body.snapshot),
 		// ⑥ 记忆的**读侧**：每轮现读一遍偏好，注入系统提示词。
 		// 写侧不在这里——那是 `remember_preference` 工具 → `/api/preferences`，
 		// 因为「记不记、记什么」必须由模型自己判断（见 prompt.ts 的铁律 6）。

@@ -50,7 +50,12 @@ export type RunAgentOptions = {
 	 * 只有**送给模型之前**才转成 `ModelMessage`。
 	 */
 	uiMessages: UIMessage[];
-	/** 前端随消息带上来的播放状态，拼进系统提示词。 */
+	/**
+	 * ⑦ 的播放状态，拼进系统提示词。**由路由备好**——agent 不 import `server/`，
+	 * 所以它只「收到事实」。服务端权威的几项（状态 / 曲目 / 队列）在路由里现取，
+	 * 只有设备侧的四项（音量 / 播放方式 / 随机 / 进度）来自浏览器上报，
+	 * 规则与理由见 `server/player/prompt-snapshot.ts`。
+	 */
 	snapshot?: PlayerSnapshot | null;
 	/**
 	 * ⑥ 已知偏好（跨对话保留）。**由路由从存储层读好传进来**——agent 不 import
