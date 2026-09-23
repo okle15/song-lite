@@ -1,0 +1,188 @@
+/**
+ * `server/agent/pricing.ts` 单测 —— 成本这一列的解析与算术。
+ *
+ * 为什么值得测：这几个函数的输出**没有任何人会去质疑**。一个偏了的钱数
+ * 出现在汇总表里，看起来就是一个正常数字；而它偏的原因通常是三种静默失效：
+ *   1. 分隔符解析错 → 拿到一个"看起来很正常"的单价（`0.4` 被当成下一个模型的输入价）；
+ *   2. 找不到价目时回落到 0 → 每一轮都显示"免费"，比没有这一列更坏；
+ *   3. 格式化的固定小数位 → 全部显示成 `$0.00`，于是"成本列已加"其实什么都没看到。
+ * 与 `turn-log.ts` 的 `ms` 用 null 不用 0 是同一条判据：**0 会伪装成一个真实的值**。
+ */
+import assert from 'node:assert/strict';
+import { afterEach, test } from 'node:test';
+import {
+	costMicro,
+	costMicroFor,
+	formatMoney,
+	parsePriceTable,
+	priceOf,
+	readPriceTable,
+	unusedPriceEntries,
+} from './pricing';
+
+const ENV = 'LLM_PRICES';
+
+afterEach(() => {
+	delete process.env[ENV];
+});
+
+/* ── 解析 ─────────────────────────────────────────────────────────── */
+
+test('parsePriceTable：正常解析 —— `;` 分条目、`,` 分两价、`=` 分键值', () => {
+	const table = parsePriceTable('agnes-2.5-flash=0.1,0.4;gpt-4o-mini=0.15,0.6');
+	assert.deepEqual(table, {
+		'agnes-2.5-flash': { inPerM: 0.1, outPerM: 0.4 },
+		'gpt-4o-mini': { inPerM: 0.15, outPerM: 0.6 },
+	});
+	assert.deepEqual(parsePriceTable('*=1,3'), { '*': { inPerM: 1, outPerM: 3 } });
+});
+
+test('parsePriceTable：条目与键名两端的空格被去掉（写环境变量时很容易带上）', () => {
+	// `LLM_PRICES=" a = 1 , 2 ; b = 3 , 4 "` —— 手工写 .env 的正常样子。
+	// 不去空格的话键名是 `" a "`，于是 `priceOf('a')` 永远找不到它，
+	// 而它只会静默回落到兜底价（或 null）。
+	assert.deepEqual(parsePriceTable(' a = 1 , 2 ; b = 3 , 4 '), {
+		a: { inPerM: 1, outPerM: 2 },
+		b: { inPerM: 3, outPerM: 4 },
+	});
+});
+
+test('parsePriceTable：空 / 未定义给空表（没配不是错误）', () => {
+	assert.deepEqual(parsePriceTable(undefined), {});
+	assert.deepEqual(parsePriceTable(''), {});
+	assert.deepEqual(parsePriceTable('  ;;  '), {});
+});
+
+test('parsePriceTable：坏条目跳过，**但好条目照常生效**（抛会让整个服务起不来）', () => {
+	const table = parsePriceTable(
+		[
+			'没有等号的一条',
+			'=0.1,0.2', // 缺键名
+			'缺一个价=0.1', // 第二个价是 NaN
+			'写反了=1,2,3', // 多了一个（多余的被忽略：取前两个）
+			'负数=-1,2', // 负价会让汇总里出现负数
+			'不是数字=abc,def',
+			'好的一条=2,8',
+		].join(';'),
+	);
+
+	// 前六条丢掉了，最后一条留着 —— 这正是"跳过而不是整体失败"的意义：
+	// 用户把价目表写错一个字符，不该导致所有轮的元数据都记不上
+	assert.deepEqual(Object.keys(table), ['写反了', '好的一条']);
+	assert.deepEqual(table['写反了'], { inPerM: 1, outPerM: 2 });
+	assert.deepEqual(table['好的一条'], { inPerM: 2, outPerM: 8 });
+});
+
+test('parsePriceTable：用 `,` 分条目会静默算出错价 —— 这就是分隔符选 `;` 的理由', () => {
+	// 把两条写成 `a=1,2,b=3,4`：解析器只能看到一处 `=`，于是 name='a'
+	// 而 `1,2,b=3,4` 取前两段 → 输入价 1、输出价 2。**它不报错**，
+	// 只是一个"看起来很正常"的错误数字 —— 比没有价目更坏。
+	const table = parsePriceTable('a=1,2,b=3,4');
+	assert.deepEqual(Object.keys(table), ['a']);
+	assert.deepEqual(table.a, { inPerM: 1, outPerM: 2 });
+});
+
+test('parsePriceTable：零价是合法的（免费模型），与"没有价目"不是一回事', () => {
+	assert.deepEqual(parsePriceTable('free=0,0'), { free: { inPerM: 0, outPerM: 0 } });
+});
+
+/* ── 取价 ─────────────────────────────────────────────────────────── */
+
+test('priceOf：精确匹配优先于 `*` 兜底', () => {
+	const table = parsePriceTable('*=9,9;agnes=1,2');
+	assert.deepEqual(priceOf(table, 'agnes'), { inPerM: 1, outPerM: 2 });
+	assert.deepEqual(priceOf(table, '别的模型'), { inPerM: 9, outPerM: 9 });
+});
+
+test('priceOf：没有任何价目时给 null（不是 0）', () => {
+	assert.equal(priceOf({}, 'agnes'), null);
+	// 只有别的模型配了价、且没有 `*` 兜底 → 也是 null。
+	// 回落到"随便取一条"会让所有数字偏着，而偏的钱没人会去质疑。
+	assert.equal(priceOf(parsePriceTable('别的=1,2'), 'agnes'), null);
+});
+
+/* ── 算术 ─────────────────────────────────────────────────────────── */
+
+test('costMicro：单价是"美元/百万 token"，所以是两次乘法一次取整', () => {
+	// 10 万输入 + 2 万输出，输入 $0.1/M、输出 $0.4/M
+	// = 100000×0.1 + 20000×0.4 = 10000 + 8000 = 18000 微美元 = $0.018
+	assert.equal(costMicro({ inputTokens: 100_000, outputTokens: 20_000 }, { inPerM: 0.1, outPerM: 0.4 }), 18_000);
+	assert.equal(costMicro({ inputTokens: 0, outputTokens: 0 }, { inPerM: 1, outPerM: 1 }), 0);
+	// 取整而不是截断：截断会让大量小轮次全部偏小，累积起来看不出是系统性的
+	assert.equal(costMicro({ inputTokens: 1, outputTokens: 0 }, { inPerM: 0.6, outPerM: 0 }), 1);
+});
+
+test('costMicro：没有价目 → null（"不知道"），不是 0（"免费"）', () => {
+	assert.equal(costMicro({ inputTokens: 1000, outputTokens: 100 }, null), null);
+});
+
+test('costMicro：0 与 null 不是一回事 —— 免费模型花 0 元，没配价是不知道花了多少', () => {
+	const free = costMicro({ inputTokens: 999_999, outputTokens: 999_999 }, { inPerM: 0, outPerM: 0 });
+	const unknown = costMicro({ inputTokens: 999_999, outputTokens: 999_999 }, null);
+
+	assert.equal(free, 0);
+	assert.equal(unknown, null);
+	assert.notEqual(free, unknown, '把"不知道"记成 0 会让汇总显示"这套系统在免费运行"');
+	// 落进 SQLite 时这两个值也确实不同（`cost_micro` 是 INTEGER，NULL 就是 NULL）
+	assert.notStrictEqual(free, unknown);
+});
+
+test('costMicro：token 数缺失（NaN / undefined）按 0 算，不让整轮变成 NaN', () => {
+	// 网关偶尔不回 usage。NaN 一旦进了算术，结果是 NaN，取整后仍是 NaN，
+	// 进 SQLite 存成 NULL —— 和"没配价"长得一样，于是"网关没回 usage"这件事
+	// 会被当成"没配价"来排查。
+	const bad = { inputTokens: Number.NaN, outputTokens: undefined as unknown as number };
+	assert.equal(costMicro(bad, { inPerM: 1, outPerM: 1 }), 0);
+	assert.ok(Number.isFinite(costMicro(bad, { inPerM: 1, outPerM: 1 })));
+});
+
+/* ── 读环境变量 ───────────────────────────────────────────────────── */
+
+test('readPriceTable：每次调用重新求值（改环境变量立刻生效，与开关那一族同理由）', () => {
+	// 模块加载时定死的话，改 `.env.local` 要重启才生效 —— 而"改了没用"会被
+	// 当成"这功能没做"。
+	process.env[ENV] = 'a=1,2';
+	assert.deepEqual(readPriceTable(), { a: { inPerM: 1, outPerM: 2 } });
+
+	process.env[ENV] = 'b=3,4';
+	assert.deepEqual(readPriceTable(), { b: { inPerM: 3, outPerM: 4 } });
+
+	delete process.env[ENV];
+	assert.deepEqual(readPriceTable(), {});
+});
+
+test('costMicroFor：从当前进程的价目表里找这个模型那一档；没配就是 null', () => {
+	process.env[ENV] = 'agnes-2.5-flash=0.1,0.4;*=1,3';
+
+	assert.equal(costMicroFor('agnes-2.5-flash', { inputTokens: 100_000, outputTokens: 20_000 }), 18_000);
+	// 未配的模型靠 `*` 兜底：网关的模型名常是别名，用户很可能只配得了兜底一档
+	// （`*` = 1,3 → 1000×1 + 1000×3 = 4000 微美元）
+	assert.equal(costMicroFor('网关别名', { inputTokens: 1000, outputTokens: 1000 }), 4000);
+
+	delete process.env[ENV];
+	assert.equal(
+		costMicroFor('agnes-2.5-flash', { inputTokens: 100_000, outputTokens: 20_000 }),
+		null,
+		'没配价目表时该是"不知道"，不是"免费"',
+	);
+});
+
+/* ── 给人看 ───────────────────────────────────────────────────────── */
+
+test('formatMoney：自适应小数位 —— 固定两位会把所有轮次显示成 $0.00', () => {
+	assert.equal(formatMoney(null), '—', '不知道与 0 要显示成不同的东西');
+	assert.equal(formatMoney(0), '$0');
+	assert.equal(formatMoney(100), '$0.00010', '单轮常在 0.0001 美元这一档');
+	assert.equal(formatMoney(5_000), '$0.00500');
+	assert.equal(formatMoney(12_000), '$0.0120');
+	assert.equal(formatMoney(1_500_000), '$1.50');
+});
+
+test('unusedPriceEntries：拼错模型名时唯一的可见痕迹', () => {
+	const table = parsePriceTable('agnes=1,2;gpt-4o=3,4;*=9,9');
+	// 配了但没被用上的（`*` 与当前模型除外）——
+	// 模型名拼错时 `priceOf` 只会回落到兜底价，**不报错**，所有历史数字都偏着
+	assert.deepEqual(unusedPriceEntries(table, 'agnes'), ['gpt-4o']);
+	assert.deepEqual(unusedPriceEntries(table, '谁也不是'), ['agnes', 'gpt-4o']);
+	assert.deepEqual(unusedPriceEntries({}, 'agnes'), []);
+});

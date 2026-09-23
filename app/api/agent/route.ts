@@ -17,12 +17,20 @@
  * 503 返回，前端直接显示 message，不必先解 SSE。
  */
 import { createUIMessageStreamResponse, isTextUIPart, toUIMessageStream, type UIMessage } from 'ai';
+import { PATCH_IDS, disabledPatches, promptVersion, unknownPatchIds } from '@/agent/prompt';
 import { readAgentConfig } from '@/agent/provider';
 import { MAX_STEPS, runAgent } from '@/agent/run';
 import type { PlayerSnapshot } from '@/contract/player';
 import { appendMessages } from '@/server/agent/message-log';
 import { listPreferences } from '@/server/agent/preference-log';
-import { recordTurn, summarizeSteps, type StepLike } from '@/server/agent/turn-log';
+import { costMicroFor } from '@/server/agent/pricing';
+import {
+	recordSpans,
+	recordTurn,
+	summarizeSpans,
+	summarizeSteps,
+	type StepLike,
+} from '@/server/agent/turn-log';
 import { fail } from '@/server/http';
 import { promptSnapshot } from '@/server/player/prompt-snapshot';
 
@@ -51,6 +59,23 @@ function lastUserText(messages: UIMessage[]): string {
 export async function POST(request: Request) {
 	// ⑨ 观测的一头一尾：`startedAt` 是路由进来的墙钟，收尾在下面的 `onEnd`。
 	const startedAt = Date.now();
+
+	// 本轮提示词的版本：静态正文的指纹 + 关掉的补丁清单。**只在这里求一次、两处用**
+	// （一处进 `agent_turns`，一处进响应头）——两边必须是同一个值，否则重跑脚本报告里的
+	// 版本与库里分组的版本会打架，而这种不一致恰恰没人看得出来。
+	const disabled = disabledPatches();
+	const version = promptVersion(disabled);
+	const unknown = unknownPatchIds(disabled);
+	if (unknown.length > 0) {
+		// 拼错 / 已删的 id **不会被静默忽略**（见 `prompt.ts` 的 `disabledPatches`）：
+		// 它进不了过滤器，于是补丁照旧启用——那种情况下「不带补丁也能过」是个**假结论**。
+		// 一次手误不该变成一条错误的研究结论，所以在这里明说。
+		console.warn(
+			`[agent] PROMPT_DISABLE 含未知补丁 id：${unknown.join(', ')}` +
+				`（有效值：${PATCH_IDS.join(', ')}）——这些补丁并未被关闭。`,
+		);
+	}
+
 	const config = readAgentConfig();
 	if (!config) {
 		return fail(
@@ -81,6 +106,15 @@ export async function POST(request: Request) {
 	const turnId = crypto.randomUUID();
 	/** 本轮的错误原文。`onError` 与 `onEnd` 是两个回调，靠这个变量把前者捎给后者。 */
 	let turnError: string | null = null;
+	/**
+	 * ⑨ 的首字延迟：模型吐出**第一个字**时距请求进来多少毫秒。
+	 *
+	 * 用「变量 + 回调」而不是「在流上挂个测量器」：钩子是 SDK 现成的 `onChunk`
+	 * （经 `runAgent` 的 `onFirstText` 透传），这里只记一个数。
+	 * 初值 `null` 有含义 —— 「一个字都没吐出来」（被掐 / 中断 / 全程在调工具），
+	 * 与"0ms 就开口了"是两件事，见 `turn-log.ts`。
+	 */
+	let firstTextMs: number | null = null;
 
 	const { result, tools } = await runAgent(config, {
 		uiMessages,
@@ -96,6 +130,13 @@ export async function POST(request: Request) {
 		preferences: listPreferences(),
 		baseUrl: new URL(request.url).origin,
 		signal: request.signal,
+		// ⑨ 的首字延迟取数点。**判据是"距请求进来多久"**，所以减 `startedAt`；
+		// `runAgent` 那边保证只回调一次（第一个非空 text-delta），这里再判一次
+		// 只是为了让"赋值"这件事本身幂等——成本为零，而它挡住的是"某天钩子
+		// 改成了每次都回调"这种会把数字记成最后一字的改动。
+		onFirstText: () => {
+			if (firstTextMs === null) firstTextMs = Date.now() - startedAt;
+		},
 	});
 
 	// ai@7 把这几个方法从 `streamText` 结果上挪成了独立函数（旧方法已标 @deprecated，
@@ -156,9 +197,23 @@ export async function POST(request: Request) {
 				}),
 				finishReason: finishReason ?? null,
 				ms: Date.now() - startedAt,
+				firstTokenMs: firstTextMs,
 				inputTokens,
 				outputTokens,
+				// 模型名与钱在这一行落库：**成本列必须与模型列同行**，否则换过模型之后
+				// 那条价格曲线会把两种价目混在一起，而图上什么异常都看不出来
+				// （见 `server/agent/pricing.ts` 的文件头）。
+				model: config.model,
+				costMicro: costMicroFor(config.model, { inputTokens, outputTokens }),
+				promptVersion: version,
+				promptDisabled: disabled.join(','),
 			});
+
+			// ⑨ 的下钻：同一批 steps 再落一次，这次**保留步的边界**（`agent_spans`）。
+			// 在 `recordTurn` 之后调、共用同一份 `steps`：两处对"哪一步调了什么"
+			// 必须同源，各取一次就是两处会漂移的实现（实测 `result.steps` 在中断时
+			// 可能拒绝，两次 await 会拿到不同结果）。
+			recordSpans(turnId, summarizeSpans(steps));
 		},
 		// 推理过程不进气泡（实测一轮里 reasoning 的字符量能占三分之二）。
 		sendReasoning: false,
@@ -171,5 +226,16 @@ export async function POST(request: Request) {
 		},
 	});
 
-	return createUIMessageStreamResponse({ stream });
+	return createUIMessageStreamResponse({
+		stream,
+		// 把本轮的提示词版本捎给调用方（`scripts/cases.mts` 拿它当报告标题）。
+		// 为什么不让脚本自己 import `agent/prompt.ts` 算一遍：那算的是**源码**的指纹，
+		// 而这个服务可能正跑着**上一次构建**的产物（改完 `agent/**` 忘了 `npm run build`
+		// 是 AGENTS.md 里明写的高频坑）——报告标题会因此指向一个并不存在的版本，
+		// 而"跑的是哪一版"正是这组对比的全部意义。
+		headers: {
+			'x-prompt-version': version,
+			'x-prompt-disabled': disabled.join(','),
+		},
+	});
 }

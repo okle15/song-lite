@@ -67,7 +67,41 @@ export type RunAgentOptions = {
 	baseUrl: string;
 	/** 客户端断开时中断本轮（关页面 / 点停止）。 */
 	signal?: AbortSignal;
+	/**
+	 * 模型**吐出第一个字**时回调一次（⑨ 观测的首字延迟取数点）。
+	 *
+	 * 这是本文件唯一一处为**观察**而加的东西，值得说清为什么它不算破规则：
+	 * 「② 冻结区」要保护的是**循环的形状**（有几层、怎么终止、怎么回填工具结果），
+	 * 而这里一行都没动 —— 挂的是 SDK 现成的 `onChunk` 钩子，同一个 `streamText`
+	 * 调用多一个参数。原版 `turn-log.ts` 里留的判据就是这条：
+	 * 「真需要时应该在 SDK 的 `onChunk` 上做，而不是在业务层糊一层」。
+	 *
+	 * 契约是**只回调一次**（实现里带本地标记），调用方不必自己去重。
+	 */
+	onFirstText?: () => void;
 };
+
+/**
+ * 造一个「第一个字」探测器。**只回调一次**，且只在真的吐了字时回调。
+ *
+ * 单独成函数、且参数按**结构**声明（不引 SDK 的联合类型）的两个理由：
+ *  1. 它可以被单测直接喂 `{ chunk: { type: 'text-delta', text: '好' } }` 跑遍，
+ *     不必起一个模型或造一个 SDK 对象；
+ *  2. 判据里那两条否定（非 text-delta、空字符串）是**会静默算错**的地方 ——
+ *     把工具调用的 chunk 当首字，延迟会算成一个偏小的值，而它看起来只是
+ *     "这次挺快"。空 delta 同理：它不是用户看得见的字。
+ */
+export function firstTextChunk(onFirstText?: () => void) {
+	if (!onFirstText) return undefined;
+	let fired = false;
+	return (event: { chunk: { type: string; text?: string } }) => {
+		if (fired) return;
+		if (event.chunk.type !== 'text-delta') return;
+		if (!event.chunk.text) return;
+		fired = true;
+		onFirstText();
+	};
+}
 
 /**
  * 跑完一整轮对话。返回 `{ result, tools }`——**流还没被消费**，怎么送出去由路由决定。
@@ -121,6 +155,10 @@ export async function runAgent(config: AgentConfig, opts: RunAgentOptions) {
 		tools,
 		stopWhen: isStepCount(MAX_STEPS),
 		abortSignal: opts.signal,
+		// ⑨ 的首字延迟。**观察钩子，不是循环的一环**：它不改变终止条件、
+		// 不参与回填、抛了也只影响一个统计数字（`onFirstText` 由调用方实现，
+		// 我们这边不 try/catch —— 观测的失败语义在 `turn-log.ts` 里）。
+		onChunk: firstTextChunk(opts.onFirstText),
 	});
 	// `tools` 一并交出：`toUIMessageStream` 要靠它判断「这个工具 part 是静态工具还是
 	// 动态工具（MCP 那类）」。不传会退化成读 part 自带的 `dynamic` 字段——当前全是静态

@@ -297,6 +297,26 @@ const CASES = [
 		expect: 'ok',
 		assert: (j) => (j.data?.removed === true ? null : '删除应返回 removed:true'),
 	},
+
+	// ── ⑩ 排期（**只读**，故意不写）──
+	// 写路径不在这里：POST 一条任务之后**没有"彻底删掉"的接口**（用户语义是"取消"，
+	// 取消掉的行动静留在表里，会出现在模型的 `list_scheduled_tasks` 里，还会占掉
+	// `closed` 那几个名额）。跑一次冒烟就在真库里留一条「已取消｜冒烟探针」，
+	// 是那种"没人看得出来"的污染 —— 与 `/api/agent` 不进冒烟同一条判断。
+	// 所以写 / 认领 / 执行那一整条链的验证方式是**临时实例**：见 README 的 ⑩ 一节
+	// 与 `scripts/tasks-tick.mts`。
+	{
+		id: 'tasks(GET)',
+		path: '/api/tasks',
+		expect: 'ok',
+		// 断的是**形状**（两组数组都在），不是内容 —— 真库里可能一件任务都没有。
+		// 这条能抓住的是：路由没了 / 信封坏了 / `open` 与 `closed` 被改名了。
+		assert: (j) =>
+			Array.isArray(j.data?.open) && Array.isArray(j.data?.closed)
+				? null
+				: `返回形状不对：${JSON.stringify(Object.keys(j.data ?? {}))}`,
+		note: '只读探针；写路径靠临时实例 + `npm run tasks:tick` 验',
+	},
 ];
 
 /**

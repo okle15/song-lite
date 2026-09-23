@@ -12,7 +12,13 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { PlayerSnapshot } from '../contract/player';
-import { buildSystemPrompt } from './prompt';
+import {
+	PATCH_IDS,
+	buildSystemPrompt,
+	disabledPatches,
+	promptVersion,
+	unknownPatchIds,
+} from './prompt';
 
 /** 造一个 n 首的队列。曲名可预期，方便断言窗口取到了哪几首。 */
 const QUEUE_OF = (n: number) =>
@@ -108,10 +114,10 @@ test('buildSystemPrompt：偏好与实时状态互不吞并（两条都在，顺
 	assert.match(p, /状态：播放中/);
 	assert.match(p, /disliked_genre/);
 	// 断言用**小节标题**而不是关键词：BODY 里为了写铁律提到过这两个中文词
-	// （「看下面的【当前播放状态】」「【已知偏好】里已经有的意思不要重复记」），
+	// （「看下面的【当前状态】」「【已知偏好】里已经有的意思不要重复记」），
 	// 用裸关键词会命中那些提及，测出来的顺序就不是小节顺序了。
 	assert.ok(
-		p.indexOf('## 当前播放状态') < p.indexOf('## 已知偏好'),
+		p.indexOf('## 当前状态') < p.indexOf('## 已知偏好'),
 		'状态块应在偏好块之前',
 	);
 });
@@ -230,7 +236,7 @@ test('队列来源：自定义队列要写清「按什么挑的」，默认整�
 
 test('播放状态块：不许承诺「实时 / 可信」，且必须声明本轮内不会自己更新', () => {
 	const p = buildSystemPrompt(snap());
-	assert.match(p, /当前播放状态（收到本条消息时的状态）/);
+	assert.match(p, /当前状态（收到本条消息时的状态）/);
 	assert.match(p, /本轮\*\*不会自己更新\*\*/); // 真正的有效期：到模型自己动手为止
 	assert.doesNotMatch(p, /实时上报/); // 它不是实时的
 	assert.doesNotMatch(p, /状态（[^）]*可信/); // 也不许再用「可信」给它背书
@@ -245,4 +251,85 @@ test('播放状态块：过期判据必须可执行——以工具返回值为�
 	assert.match(p, /以工具返回值为准/); // BODY 的工作方式那条也要跟上
 	// 但也不能矫枉过正成"每次答之前先确认一遍"——那等于把「不要为这个调工具」推翻
 	assert.match(p, /不必为此额外调工具/);
+});
+
+/* ── 补丁段落与开关（2026-09-23 加：给「失败案例集」造入口）────────────
+ *
+ * 为什么值得测：`PROMPT_DISABLE` 是「这条补丁还需不需要」这个问题的**唯一入口**
+ * ——关掉它、跑 `npm run cases`、看数字。所以它坏掉的方式不是"程序崩"，是
+ * **研究结论错**，而且错得看不出来：
+ *   - 关不掉 → 你以为跑了不带补丁的一遍，其实带着 → 结论「补丁还有用」（假阳性）；
+ *   - 关太多 → 把边界（纯文本气泡、记忆准入）也关掉 → 产品坏掉，而 prompt 只是变短了；
+ *   - 指纹不跟着变 → 两版的行混进同一组 → 数字对不出来，而那正是这整套东西的意义。
+ * 下面四条各钉一个。
+ */
+
+test('补丁开关：关掉的段落**整段消失**，而且不连坐', () => {
+	const on = buildSystemPrompt(snap());
+	const off = buildSystemPrompt(snap(), null, ['work_style']);
+
+	assert.match(on, /## 工作方式/);
+	assert.doesNotMatch(off, /## 工作方式/, '关掉后这一节必须整段不见，而不是留个空标题');
+	assert.doesNotMatch(off, /放某首歌/, '正文也不能有残留');
+
+	// 关一个不能连坐。这条不是洁癖：如果实现是"整份正文重拼"，关一个补丁顺手丢掉
+	// 别的东西时，上面两条断言照样绿 —— 而对比出来的差别就不再是这个补丁造成的了。
+	assert.match(off, /## 能力边界/);
+	assert.match(off, /## 当前状态/);
+	assert.match(off, /## 已知偏好/);
+});
+
+test('补丁全关掉，边界也必须在：铁律 4 / 6 不是补丁', () => {
+	// LEARNING.md §0 的第四类：读起来像"提醒模型"，删掉产品就坏。判据是
+	// 「删掉它，是模型行为变差、还是产品事实被违反」——后一类**不给开关**。
+	// 这条钉的是"别顺手把边界也登记进 PATCHES"这个动作本身。
+	const p = buildSystemPrompt(snap(), null, [...PATCH_IDS]);
+	assert.match(p, /不要用 Markdown 标记/, '气泡只渲染纯文本——关掉它产品就坏');
+	assert.match(p, /只有稳定的偏好与长期约束才值得记/, '记忆的准入标准，是这个产品的定义');
+	assert.match(p, /曲名 \/ 歌手只能来自工具返回值/);
+	assert.match(p, /工具失败必须如实告知/);
+});
+
+test('指纹：同输入同值、改开关必变（它是分组对比的键）', () => {
+	assert.equal(promptVersion([]), promptVersion([]), '同输入必须同值，否则"分组"无从谈起');
+	assert.notEqual(promptVersion([]), promptVersion(['work_style']), '带 / 不带补丁必须是两个版本');
+});
+
+test('拼错的补丁 id 不静默：认得出、且不与默认版同组', () => {
+	const bad = ['wrok_style'];
+	assert.deepEqual(unknownPatchIds(bad), ['wrok_style'], '路由靠它发警告（否则一条手误没人知道）');
+	assert.deepEqual(unknownPatchIds(['work_style']), [], '正确的 id 不该被算成未知');
+
+	// 行为上它**什么也没关**（过滤器不认识它）——所以「不带补丁也能过」会是个假结论。
+	// 唯一的补救是让它**看得见**：指纹不同，于是它不会冒充默认版混进去。
+	assert.match(buildSystemPrompt(snap(), null, bad), /## 工作方式/, '未知 id 关不掉任何东西');
+	assert.notEqual(promptVersion(bad), promptVersion([]), '但换了指纹，于是自成一版');
+	assert.notEqual(promptVersion(bad), promptVersion(['work_style']), '也不等于"真的关掉"那一版');
+});
+
+test('PROMPT_DISABLE 是唯一入口：空格容错、未知项原样保留、每次都重新读', () => {
+	const restore = process.env.PROMPT_DISABLE;
+	try {
+		delete process.env.PROMPT_DISABLE;
+		assert.deepEqual(disabledPatches(), [], '没设 = 全启用');
+
+		// 两侧空格必须吃掉：不然 `PROMPT_DISABLE= work_style` 会永远关不掉，
+		// 而界面上一切正常——只是那条补丁一直在，研究结论因此反了。
+		process.env.PROMPT_DISABLE = ' work_style ';
+		assert.deepEqual(disabledPatches(), ['work_style']);
+		assert.doesNotMatch(buildSystemPrompt(snap()), /## 工作方式/, '环境变量真能关掉它');
+
+		process.env.PROMPT_DISABLE = 'work_style,nope';
+		assert.deepEqual(disabledPatches(), ['work_style', 'nope'], '未知项原样保留（见上一条）');
+
+		process.env.PROMPT_DISABLE = '';
+		assert.deepEqual(disabledPatches(), [], '空串 = 全启用');
+
+		// 「每次调用重新求值」在上面几步里已经被证明了：改完环境变量立刻生效。
+		// 若哪天有人把它改成模块级常量，那几条断言会一起红——这正是要的效果，
+		// 因为 `PROMPT_DISABLE` 的用法就是"换个值再起一个进程"。
+	} finally {
+		if (restore === undefined) delete process.env.PROMPT_DISABLE;
+		else process.env.PROMPT_DISABLE = restore;
+	}
 });

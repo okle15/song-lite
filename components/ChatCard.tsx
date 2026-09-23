@@ -46,6 +46,9 @@ const TOOL_LABEL: Record<string, string> = {
 	remember_preference: '记住偏好',
 	forget_preference: '忘掉偏好',
 	set_track_tags: '重设标签',
+	schedule_task: '排个任务',
+	list_scheduled_tasks: '任务清单',
+	cancel_scheduled_task: '撤销任务',
 };
 
 /** 轨迹卡片要展示的三样东西。 */

@@ -35,7 +35,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { PLAYBACK_MODE_LABEL } from '../contract/player';
 import { normalizePreferenceKey, type Preference } from '../contract/preference';
-import type { ToolOutcome } from '../contract/tool';
+import type { ToolFailureKind, ToolOutcome } from '../contract/tool';
 import { normalizeTags } from '../contract/track-tags';
 
 export type ToolRunContext = {
@@ -47,26 +47,67 @@ export type ToolRunContext = {
 
 type Envelope<T> = { code: number; data?: T; message?: string };
 
+/** 一次 BFF 调用的结果。**失败那一支一定带 `kind`**（判据见 `contract/tool.ts`）。 */
+type BffResult<T> =
+	| { ok: true; data?: T; message: string }
+	| { ok: false; message: string; kind: ToolFailureKind };
+
+/**
+ * 把一次失败的 HTTP 响应归类。
+ *
+ * 判据只用 **HTTP status**，不去读 message 的措辞 —— 按文案猜（"含'不存在'就是 404"）
+ * 会在 BFF 改一次文案之后静默失效，而 status 不会。这条纪律与 `turn-log.ts` 里
+ * 「按 toolCallId 配对而不是按下标」同源：**别用一个会变的信号去替代那个稳定的信号**。
+ */
+function classifyStatus(status: number): ToolFailureKind {
+	if (status === 404) return 'not_found';
+	if (status === 400 || status === 422) return 'bad_request';
+	if (status === 401 || status === 403) return 'forbidden';
+	if (status >= 500) return 'unavailable';
+	return 'unknown';
+}
+
 /**
  * 调自家 BFF。**成功判据是 `code === 0`，不是 `res.ok`**——
  * 本项目信封的约定是成功 `code: 0`、失败时 `code` 才等于 HTTP status。
  * 按「200 即成功」写会漏掉「HTTP 200 但 code 非 0」的情形。
+ *
+ * 失败时除了 `message` 还给出 `kind`（B1）：三个压平了很久的失败类别终于分开，
+ * 而**怎么应对仍然由模型决定**（这里一个字都不建议）。
  */
 async function callBff<T>(
 	ctx: ToolRunContext,
 	path: string,
 	init?: RequestInit,
 	signal?: AbortSignal,
-): Promise<{ ok: boolean; data?: T; message: string }> {
+): Promise<BffResult<T>> {
 	try {
 		const res = await fetch(new URL(path, ctx.baseUrl), { ...init, signal });
 		const body = (await res.json().catch(() => null)) as Envelope<T> | null;
-		if (!res.ok || !body || body.code !== 0) {
-			return { ok: false, message: body?.message ?? `HTTP ${res.status}` };
+		// ⚠️ 「拿到了响应、但回的不是我们的信封」与「压根没拿到响应」是**两种病**
+		// （打到了别的服务 / 服务没起来）。原来它们与"业务失败"一起被压成同一句
+		// 「请求失败」，于是模型对三种完全不同的处境给同一个反应。
+		if (!body) {
+			return {
+				ok: false,
+				kind: 'transport',
+				message: `HTTP ${res.status} 且响应不是 JSON（打到的可能不是本项目）`,
+			};
+		}
+		if (!res.ok || body.code !== 0) {
+			return {
+				ok: false,
+				kind: classifyStatus(res.status),
+				message: body.message ?? `HTTP ${res.status}`,
+			};
 		}
 		return { ok: true, data: body.data, message: body.message ?? 'ok' };
 	} catch (err) {
-		return { ok: false, message: `请求失败：${err instanceof Error ? err.message : String(err)}` };
+		return {
+			ok: false,
+			kind: 'transport',
+			message: `请求失败：${err instanceof Error ? err.message : String(err)}`,
+		};
 	}
 }
 
@@ -121,6 +162,31 @@ type TagListData = { tags: TagRow[] };
 /** `/api/library/tags?trackId=` 的单条响应：没有标签时 `tag` 为 null。 */
 type SingleTagData = { tag: TagRow | null };
 
+/* ── ⑩ 触发器用的三个形状 ────────────────────────────────────────
+ *
+ * ⚠️ 这些类型**在 agent 侧重新声明**，不 import `server/agent/tasks.ts`：
+ * 依赖方向是 `app → server → contract`，`agent/` 对 `server/` 只允许 `import type`…
+ * 而这里连 type 都不用 —— 工具是 HTTP 客户端，它该认的是**响应体**（什么字段、
+ * 什么类型），不是服务端的内部类型。BFF 改了签名，这里只会以一个 400 暴露，
+ * 而不是编译期耦合（这正是 `agent/tools.ts` 头注里选 HTTP 而不是进程内直调的理由）。
+ */
+type TaskRow = {
+	id: string;
+	goal: string;
+	dueAt: string;
+	repeat: 'none' | 'daily' | 'weekly';
+	/** `weekly` 的"哪几天"（0=周日…6=周六）。服务端**恒给出非空**（见 tasks.ts 的 `createTask`）。 */
+	repeatDays?: number[];
+	status: string;
+	attempts: number;
+	result: string | null;
+	lastError: string | null;
+};
+
+type TaskListData = { open: TaskRow[]; closed: TaskRow[] };
+type TaskCreateData = { task: TaskRow };
+type TaskCancelData = { id: string; cancelled: boolean };
+
 /* ── 两个纯函数：把数据译成模型读得懂的话 ─────────────────────────
  *
  * 它们**导出是给单测用的**（`agent/tools.test.ts`），不是给别的模块调。
@@ -162,6 +228,46 @@ export function formatPlayTime(iso: string, now: Date = new Date()): string {
 	return rel ? `${stamp}，${rel}` : stamp;
 }
 
+/** 星期几。`getDay()` 是 0=周日，与 `Intl` 的中文输出不一定一致，所以自己钉一份。 */
+const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+/** 「每周一三五」中间那串字（`[1,3,5]` → `一三五`）。**索引与 `WEEKDAYS` 同序**。 */
+const DAY_CHARS = ['日', '一', '二', '三', '四', '五', '六'];
+
+/**
+ * 把 `repeat` / `repeatDays` 译成一句人话的**标签**：`每天` / `每周一三五` / `''`（只做一次）。
+ *
+ * 它存在的理由是**把服务端理解成的东西念回去**：模型自己推的 `dueAt` 与它嘴上说的
+ * 「每周一」是不是同一件事，只有在返回值里看见才算核对过一遍。少念一档
+ * （比如 daily 与 weekly 都不说）时，模型会以为"排上了"就是"按我要的频率排上了"，
+ * 而那两种频率差了七倍。
+ *
+ * 只给标签、不给整句，是因为它有两个读法：排期成功后念回「，每周一重复」，
+ * 列清单时贴在时间后面「（每周一）」—— 一句话写死在一处，另一处就只能再写一遍。
+ */
+function repeatLabel(repeat: TaskRow['repeat'], days: number[] | undefined): string {
+	if (repeat === 'daily') return '每天';
+	if (repeat !== 'weekly') return '';
+	const list = days ?? [];
+	return list.length > 0 ? `每周${list.map((d) => DAY_CHARS[d] ?? '?').join('')}` : '每周';
+}
+
+/**
+ * 把 ISO 时间译成「09-24 07:00，周四」。**只给绝对时间，不给相对说法**（与
+ * `formatPlayTime` 相反）—— 排期是**将来**的事，而「明天」这种说法会随读它的
+ * 那一刻改变；这里唯一的用途是让模型**核对自己算的时间对不对**，那需要一个
+ * 不会动的锚。库里存的是脏值时原样返回，不编一个时间出来。
+ */
+export function formatAbsolute(iso: string): string {
+	const at = new Date(iso);
+	if (Number.isNaN(at.getTime())) return iso;
+	const pad = (n: number) => String(n).padStart(2, '0');
+	return (
+		`${pad(at.getMonth() + 1)}-${pad(at.getDate())} ` +
+		`${pad(at.getHours())}:${pad(at.getMinutes())}，${WEEKDAYS[at.getDay()]}`
+	);
+}
+
 /**
  * 把标签行汇总成「库里存在哪些标签」。按出现次数降序，同次数按字母序
  * （**排序稳定**才能写断言，也才能让同样的库每次给出同样的提示词）。
@@ -183,6 +289,35 @@ export function summarizeTags(rows: TagRow[]): { tag: string; count: number; use
 }
 
 /**
+ * 模型看到的东西：`text`，失败时**多一个 kind 前缀**。
+ *
+ * 为什么用 `[kind]` 这个形状：它是一条**结构化的单点标签**（闭集里的一个词），
+ * 位置固定、一眼能与正文分开。做成 JSON 对象（`{ok, kind, message}`）语义更干净，
+ * 但会让成功与失败两种返回**形状不同**，而模型对"同一个工具有两种形状"的处理，
+ * 不如对"一段话前面多个标签"稳。
+ *
+ * ⚠️ 这里**不许加解释性文字**（「建议换个说法」「可以重试」）——那是话术，
+ * 正是 B1 要避免的东西（LEARNING.md §3.3：加 kind 之后只把真相交给模型）。
+ *
+ * ⚠️⚠️ 参数类型写成 `unknown` 而不是 `ToolOutcome`，这是**必须的**，不是省事：
+ * `toModelOutput` 写成 `toModelOutput: toModel`（一个已声明、带类型的函数）会打断
+ * `tool({...})` 对 `TOOLS` 的推导，TS 于是报在 `inputSchema` 上，看起来像 zod 版本
+ * 问题（本文件头注第 2 条踩过同一个坑）。所以调用处保持**内联、不写注解**的箭头函数，
+ * 由上下文反推出 `output` 的类型；真正的逻辑挪到这里，用 `unknown` 自己收窄。
+ */
+function modelText(output: unknown): { type: 'text'; value: string } {
+	const o = (typeof output === 'object' && output !== null ? output : {}) as {
+		ok?: unknown;
+		text?: unknown;
+		kind?: unknown;
+	};
+	const text = typeof o.text === 'string' ? o.text : '';
+	const kind = typeof o.kind === 'string' ? o.kind : null;
+	if (o.ok === true || !kind) return { type: 'text', value: text };
+	return { type: 'text', value: `[${kind}] ${text}` };
+}
+
+/**
  * 构造本次请求的工具集。
  *
  * 每个 `execute` **不抛异常**：失败也走返回值（`ok:false` + 原因文字）。理由是这个
@@ -192,14 +327,18 @@ export function summarizeTags(rows: TagRow[]): { tag: string; count: number; use
 export function createTools(ctx: ToolRunContext) {
 	/** 计时 + 把异常收敛成失败结果。 */
 	const settled = async (
-		act: () => Promise<{ ok: boolean; text: string }>,
+		act: () => Promise<{ ok: boolean; text: string; kind?: ToolFailureKind | null }>,
 	): Promise<ToolOutcome> => {
 		const started = Date.now();
 		try {
 			return { ...(await act()), ms: Date.now() - started };
 		} catch (err) {
+			// 走到这里说明**工具自己的代码**炸了（不是 BFF 返回失败）——
+			// 归 `unknown`（不确定，别猜）。原来它与"曲目不存在"长得一模一样，
+			// 于是模型会对一个代码缺陷说「这首曲子找不到，要不要换一首」。
 			return {
 				ok: false,
+				kind: 'unknown',
 				text: `工具执行异常：${err instanceof Error ? err.message : String(err)}`,
 				ms: Date.now() - started,
 			};
@@ -236,7 +375,7 @@ export function createTools(ctx: ToolRunContext) {
 						undefined,
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `检索失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `检索失败：${r.message}`, kind: r.kind };
 
 					const total = r.data?.total ?? 0;
 					const songs = r.data?.songs ?? [];
@@ -265,7 +404,7 @@ export function createTools(ctx: ToolRunContext) {
 					};
 				}),
 			// 只把 text 交给模型；不写这个，默认会把整个 {ok,text,ms} JSON 发过去。
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		play_track: tool({
@@ -287,11 +426,11 @@ export function createTools(ctx: ToolRunContext) {
 						{ method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ trackId }) },
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `播放失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `播放失败：${r.message}`, kind: r.kind };
 					const t = r.data?.currentTrack;
 					return { ok: true, text: t ? `已开始播放：${t.title} — ${t.artist}` : '已切换曲目。' };
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		/**
@@ -339,7 +478,7 @@ export function createTools(ctx: ToolRunContext) {
 							{ method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ trackIds: [] }) },
 							abortSignal,
 						);
-						if (!r.ok) return { ok: false, text: `恢复整个曲库失败：${r.message}` };
+						if (!r.ok) return { ok: false, text: `恢复整个曲库失败：${r.message}`, kind: r.kind };
 						return {
 							ok: true,
 							text: `队列已恢复为整个曲库，共 ${r.data?.queueSize ?? 0} 首，从第一首开始放。`,
@@ -353,7 +492,7 @@ export function createTools(ctx: ToolRunContext) {
 						undefined,
 						abortSignal,
 					);
-					if (!found.ok) return { ok: false, text: `按「${q}」挑歌失败：${found.message}` };
+					if (!found.ok) return { ok: false, text: `按「${q}」挑歌失败：${found.message}`, kind: found.kind };
 					const songs = found.data?.songs ?? [];
 					if (songs.length === 0) {
 						// 队列**没有动**，这一点必须说清楚：否则模型可能以为换成了空队列。
@@ -374,7 +513,7 @@ export function createTools(ctx: ToolRunContext) {
 						},
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `换成这一批队列失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `换成这一批队列失败：${r.message}`, kind: r.kind };
 
 					const total = found.data?.total ?? songs.length;
 					const missing = r.data?.missing?.length ?? 0;
@@ -393,7 +532,7 @@ export function createTools(ctx: ToolRunContext) {
 							`现在开始放第 1 首。开头几首：\n${head}`,
 					};
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		next_track: tool({
@@ -407,12 +546,12 @@ export function createTools(ctx: ToolRunContext) {
 						{ method: 'POST' },
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `切歌失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `切歌失败：${r.message}`, kind: r.kind };
 					const t = r.data?.currentTrack;
 					if (!t) return { ok: true, text: '已经是队列最后一首，播放已停止。' };
 					return { ok: true, text: `已跳到下一首：${t.title} — ${t.artist}` };
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		pause_playback: tool({
@@ -426,10 +565,10 @@ export function createTools(ctx: ToolRunContext) {
 						{ method: 'POST' },
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `暂停失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `暂停失败：${r.message}`, kind: r.kind };
 					return { ok: true, text: '已暂停。' };
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		resume_playback: tool({
@@ -443,10 +582,10 @@ export function createTools(ctx: ToolRunContext) {
 						{ method: 'POST' },
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `继续播放失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `继续播放失败：${r.message}`, kind: r.kind };
 					return { ok: true, text: '已继续播放。' };
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		/**
@@ -481,13 +620,13 @@ export function createTools(ctx: ToolRunContext) {
 						},
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `调整音量失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `调整音量失败：${r.message}`, kind: r.kind };
 					// 回读服务端的实际值（它可能夹紧过）—— 报「设成 30%」而实际是 100%
 					// 是那种用户当场就能发现、而代码永远不会红的错。
 					const now = Math.round((r.data?.volume ?? level / 100) * 100);
 					return { ok: true, text: now === 0 ? '已静音（音量 0%）。' : `音量已设为 ${now}%。` };
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		/**
@@ -531,7 +670,7 @@ export function createTools(ctx: ToolRunContext) {
 						},
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `设置播放方式失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `设置播放方式失败：${r.message}`, kind: r.kind };
 
 					const parts: string[] = [];
 					// 只复述**这次改动的**那一部分。写成 `if (r.data?.mode)` 就会在
@@ -540,7 +679,7 @@ export function createTools(ctx: ToolRunContext) {
 					if (shuffle !== undefined) parts.push(shuffle ? '随机播放' : '不随机');
 					return { ok: true, text: `播放方式已设为：${parts.join(' + ')}。` };
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		/**
@@ -584,10 +723,10 @@ export function createTools(ctx: ToolRunContext) {
 						},
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `记住失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `记住失败：${r.message}`, kind: r.kind };
 					return { ok: true, text: `已记住：${value}（key=${normalized}）` };
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		forget_preference: tool({
@@ -601,7 +740,7 @@ export function createTools(ctx: ToolRunContext) {
 				settled(async () => {
 					const normalized = normalizePreferenceKey(key);
 					if (!normalized) {
-						return { ok: false, text: 'key 不合法：只能用英文字母、数字、下划线。' };
+						return { ok: false, kind: 'bad_request', text: 'key 不合法：只能用英文字母、数字、下划线。' };
 					}
 					const r = await callBff<{ removed: boolean }>(
 						ctx,
@@ -609,13 +748,13 @@ export function createTools(ctx: ToolRunContext) {
 						{ method: 'DELETE' },
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `忘掉失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `忘掉失败：${r.message}`, kind: r.kind };
 					return {
 						ok: true,
 						text: r.data?.removed ? `已忘掉「${normalized}」。` : `本来就没记过「${normalized}」。`,
 					};
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		/**
@@ -678,7 +817,7 @@ export function createTools(ctx: ToolRunContext) {
 						undefined,
 						abortSignal,
 					);
-					if (!current.ok) return { ok: false, text: `读取原有标签失败：${current.message}` };
+					if (!current.ok) return { ok: false, text: `读取原有标签失败：${current.message}`, kind: current.kind };
 					const before = current.data?.tag?.tags ?? [];
 
 					const final = [...new Set([...before, ...toAdd])].filter((t) => !toRemove.includes(t)).sort();
@@ -711,7 +850,7 @@ export function createTools(ctx: ToolRunContext) {
 								{ method: 'DELETE' },
 								abortSignal,
 							);
-					if (!wrote.ok) return { ok: false, text: `更新标签失败：${wrote.message}` };
+					if (!wrote.ok) return { ok: false, text: `更新标签失败：${wrote.message}`, kind: wrote.kind };
 
 					// 复述**最终全量**而不是「成功了」：模型拿这句去回答用户，用户照着
 					// 这句核对；只回「已更新」时，改错了要等下次看标签列表才发现。
@@ -725,7 +864,7 @@ export function createTools(ctx: ToolRunContext) {
 							`这首歌的标签从此以你的设定为准，自动打标不会再改动它。`,
 					};
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		/**
@@ -750,7 +889,7 @@ export function createTools(ctx: ToolRunContext) {
 						undefined,
 						abortSignal,
 					);
-					if (!r.ok) return { ok: false, text: `读取播放历史失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `读取播放历史失败：${r.message}`, kind: r.kind };
 					const plays = r.data?.plays ?? [];
 					if (plays.length === 0) return { ok: true, text: '还没有播放记录。' };
 					const lines = plays.map(
@@ -758,7 +897,7 @@ export function createTools(ctx: ToolRunContext) {
 					);
 					return { ok: true, text: `最近 ${plays.length} 次播放，新的在前：\n${lines.join('\n')}` };
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		/**
@@ -770,7 +909,7 @@ export function createTools(ctx: ToolRunContext) {
 			description:
 				'跳到当前播放队列中的第 position 首并开始播放。用于用户**按位置**说话的场景：' +
 				'「跳到第 5 首」「回到第一首」「跳到队列最后一首」。' +
-				'position 从 1 开始，对应系统提示词【当前播放状态】里队列列表的编号。' +
+				'position 从 1 开始，对应系统提示词【当前状态】里队列列表的编号。' +
 				'如果用户说的是曲名，改用 search_library + play_track。',
 			inputSchema: z.object({
 				position: z.number().int().min(1).describe('队列中的位置，从 1 开始（1 = 第一首）。'),
@@ -791,6 +930,7 @@ export function createTools(ctx: ToolRunContext) {
 					if (!r.ok) {
 						return {
 							ok: false,
+							kind: r.kind,
 							text: `跳到第 ${position} 首失败：${r.message}。当前队列的长度见系统提示词的队列列表。`,
 						};
 					}
@@ -800,7 +940,7 @@ export function createTools(ctx: ToolRunContext) {
 						text: t ? `已跳到第 ${position} 首：${t.title} — ${t.artist}` : `已跳到第 ${position} 首。`,
 					};
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 
 		/**
@@ -820,7 +960,7 @@ export function createTools(ctx: ToolRunContext) {
 			execute: (_args, { abortSignal }) =>
 				settled(async () => {
 					const r = await callBff<TagListData>(ctx, '/api/library/tags', undefined, abortSignal);
-					if (!r.ok) return { ok: false, text: `读取标签失败：${r.message}` };
+					if (!r.ok) return { ok: false, text: `读取标签失败：${r.message}`, kind: r.kind };
 					const rows = r.data?.tags ?? [];
 					const summary = summarizeTags(rows);
 					if (summary.length === 0) return { ok: true, text: '曲库里还没有任何风格标签。' };
@@ -837,7 +977,150 @@ export function createTools(ctx: ToolRunContext) {
 						text: `共 ${summary.length} 个标签（${rows.length} 首歌已有标签）：\n${body}${tail}`,
 					};
 				}),
-			toModelOutput: ({ output }) => ({ type: 'text', value: output.text }) as const,
+			toModelOutput: ({ output }) => modelText(output),
+		}),
+
+		/* ── ⑩ 触发器（2026-09-23 加）──────────────────────────────────
+		 *
+		 * 三个工具的形状完全对称：**排 / 看 / 撤**。加它们不是"多了三个功能"，
+		 * 而是补齐了 BLUEPRINT §2 里唯一空着的那个部件 —— 在这之前 agent
+		 * 只可能被"用户这一秒说了句话"唤醒。
+		 *
+		 * ⚠️ 一件要在文档里说清、否则会被误读的事：**它不是"定时器功能"**。
+		 * `LEARNING.md §3.1` 的判断是"接定时器只是加一层，真正要设计的是**任务**
+		 * 这个概念"（跨轮的目标：这次推到哪儿了、下次该不该继续）。所以这里能看到
+		 * 的是任务的三件事，看不到任何 cron 表达式 —— 定时器属于**部署环境**
+		 * （见 `server/agent/tasks.ts` 的文件头：为什么刻意不做常驻定时器）。
+		 */
+		schedule_task: tool({
+			description:
+				'把一件事**排在将来某个时间**做，到点后你会被自动唤醒去做它（不需要用户在那一刻说话）。' +
+				'用于「明天早上七点叫我起床时放首歌」「十分钟后暂停」「每天早上放点新闻」「每周一早上放首歌」这类**明确说了时间**的要求。' +
+				'dueAt 必须是 ISO 8601 时间（如 2026-09-24T07:00:00+08:00）——' +
+				'请按系统提示词【现在】那一行自己算出绝对时间，不要传「明天早上」这种说法。' +
+				'user 只说了「过一会儿」而没有具体时间时，先问清具体时刻再排。' +
+				'用户要的是**现在**就做，就不要用本工具，直接做。',
+			inputSchema: z.object({
+				goal: z
+					.string()
+					.min(1)
+					.describe(
+						'到点后要做什么，写清是哪件事、对谁做。写成你能独立看懂的一句（到点时你只看到这句话）。',
+					),
+				dueAt: z
+					.string()
+					.min(1)
+					.describe('什么时候做，ISO 8601 格式，如 2026-09-24T07:00:00+08:00。'),
+				repeat: z
+					.enum(['none', 'daily', 'weekly'])
+					.optional()
+					.describe(
+						'重复方式。默认 none（只做一次）；「每天」用 daily；「每周几」用 weekly。' +
+							'weekly 且不传 repeatDays 就是"每周同一天"——那一天由 dueAt 落在星期几决定。',
+					),
+				repeatDays: z
+					.array(z.number().int().min(0).max(6))
+					.optional()
+					.describe(
+						'只在 repeat=weekly 且要指定**多天**时传（「每周一三五」→ [1,3,5]）。' +
+							'0=周日，1=周一…6=周六；只重复一天时不必传（dueAt 已经说了是哪天）。',
+					),
+			}),
+			execute: ({ goal, dueAt, repeat, repeatDays }, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<TaskCreateData>(
+						ctx,
+						'/api/tasks',
+						{
+							method: 'POST',
+							headers: JSON_HEADERS,
+							body: JSON.stringify({ goal, dueAt, repeat: repeat ?? 'none', repeatDays }),
+						},
+						abortSignal,
+					);
+					if (!r.ok) return { ok: false, text: `排期失败：${r.message}`, kind: r.kind };
+					const t = r.data?.task;
+					if (!t) return { ok: false, text: '排期失败：服务端没有返回任务。', kind: 'unknown' };
+					// 把算出来的时间与"做一次 / 每天 / 每周几"**念回去**：`dueAt` 是模型自己
+					// 推的，念回去它才能发现自己算错了时区或频率（而它算错时没人会报错）。
+					const when = formatAbsolute(t.dueAt);
+					const every = repeatLabel(t.repeat, t.repeatDays);
+					return {
+						ok: true,
+						text:
+							`已排期（id=${t.id}）：${when}${every ? `，${every}重复` : ''}\n` +
+							`要做的事：${t.goal}`,
+					};
+				}),
+			toModelOutput: ({ output }) => modelText(output),
+		}),
+
+		list_scheduled_tasks: tool({
+			description:
+				'查看已排期的任务：还没做的（含到点但还没跑到的）在前，另附最近做完的几条。' +
+				'用于「我让你做过什么」「明天早上那件事排上了吗」这类问题，' +
+				'也用于**改主意之前先确认要撤销的是哪一条**（拿它的 id）。' +
+				'要撤销请用 cancel_scheduled_task。',
+			inputSchema: z.object({}),
+			execute: (_args, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<TaskListData>(ctx, '/api/tasks', undefined, abortSignal);
+					if (!r.ok) return { ok: false, text: `读取任务失败：${r.message}`, kind: r.kind };
+					const open = r.data?.open ?? [];
+					const closed = r.data?.closed ?? [];
+					if (open.length === 0 && closed.length === 0) {
+						return { ok: true, text: '还没有排过任何任务。' };
+					}
+					const rows: string[] = [];
+					if (open.length > 0) {
+						rows.push('待执行（按该做的时间）：');
+						for (const t of open) {
+							const when = formatAbsolute(t.dueAt);
+							const state = t.status === 'running' ? '（正在做）' : '';
+							// 频率要标出来：清单里"每周一放歌"与"就这一次"长得一样时，
+							// 用户说「把每周那件撤了」模型就只能猜 —— 而猜错撤掉的是另一件。
+							const every = repeatLabel(t.repeat, t.repeatDays);
+							rows.push(`· ${when}${state}${every ? `（${every}）` : ''}｜${t.goal}｜id=${t.id}`);
+						}
+					}
+					if (closed.length > 0) {
+						rows.push('最近做过的：');
+						for (const t of closed) {
+							const done = t.status === 'done' ? '已完成' : t.status === 'cancelled' ? '已取消' : '失败';
+							rows.push(`· ${done}｜${t.goal}｜${(t.result ?? t.lastError ?? '').slice(0, 60)}`);
+						}
+					}
+					return { ok: true, text: rows.join('\n') };
+				}),
+			toModelOutput: ({ output }) => modelText(output),
+		}),
+
+		cancel_scheduled_task: tool({
+			description:
+				'撤销一件**还没做完**的排期任务。用于「别放了我睡了」「把早上那件事取消」。' +
+				'id 必须来自 list_scheduled_tasks 的返回值，不要自己编。' +
+				'已经做完的任务撤不掉（返回值会告诉你 cancelled=false）——那是来晚了一步，不是出错。',
+			inputSchema: z.object({
+				id: z.string().min(1).describe('要撤销的任务 id，来自 list_scheduled_tasks。'),
+			}),
+			execute: ({ id }, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<TaskCancelData>(
+						ctx,
+						'/api/tasks',
+						{ method: 'PATCH', headers: JSON_HEADERS, body: JSON.stringify({ id }) },
+						abortSignal,
+					);
+					if (!r.ok) return { ok: false, text: `撤销失败：${r.message}`, kind: r.kind };
+					if (!r.data?.cancelled) {
+						return {
+							ok: true,
+							text: '这件事不在「还没做」的状态里（可能已经做过了，或 id 不对）——没有改动任何东西。',
+						};
+					}
+					return { ok: true, text: `已撤销排期 ${id}。` };
+				}),
+			toModelOutput: ({ output }) => modelText(output),
 		}),
 	};
 }

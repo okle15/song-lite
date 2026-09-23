@@ -10,7 +10,9 @@
     "test": "tsx --test \"agent/**/*.test.ts\" \"components/**/*.test.ts\" \"contract/**/*.test.ts\" \"server/**/*.test.ts\"",
     "smoke:api": "node scripts/api-smoke.mjs",
     "tag:library": "tsx --env-file-if-exists=.env.local scripts/auto-tag.mts",
-    "turns": "tsx --env-file-if-exists=.env.local scripts/turns.mts"
+    "turns": "tsx --env-file-if-exists=.env.local scripts/turns.mts",
+    "cases": "tsx scripts/cases.mts",
+    "tasks:tick": "tsx scripts/tasks-tick.mts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.48",
