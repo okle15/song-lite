@@ -44,6 +44,7 @@ import { LayoutMenu } from '@/components/LayoutMenu';
 import { LayoutProvider, useLayout } from '@/components/LayoutProvider';
 import { LibraryGrid } from '@/components/LibraryGrid';
 import { LyricsPanel } from '@/components/LyricsPanel';
+import { MemoryCard } from '@/components/MemoryCard';
 import { NowPlaying } from '@/components/NowPlaying';
 import { PaneShell, paneLabel } from '@/components/PaneShell';
 import { PlayerBar } from '@/components/PlayerBar';
@@ -200,6 +201,13 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 				);
 			case 'lyrics':
 				return <LyricsPanel />;
+			case 'memory':
+				// `refreshKey` 与 `tasks` 同一个理由、同一条链：能改到这份清单的只有
+				// 「跟助手说记住 / 忘掉」（工具）与「在这张卡上点忘掉」两条路，
+				// 而两者都会让这一轮对话多出消息 —— 于是卡片自动重取。
+				// ⚠️ 但**批准那个动作发生在对话卡里**：`forget_preference` 走审批，
+				// 用户点了「执行」之后消息才变，所以刷新是跟着那一下来的，不是跟着工具调用来的。
+				return <MemoryCard refreshKey={chat.messages.length} />;
 			case 'nowplaying':
 				return <NowPlaying />;
 			case 'queue':

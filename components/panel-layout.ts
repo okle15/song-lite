@@ -1,7 +1,7 @@
 /**
  * 可配置面板布局：类型 / 默认值 / 持久化 / 变更操作。
  *
- * 需求：音乐助手、歌词、正在播放、播放队列 4 张卡片要能
+ * 需求：面板里的**每一张卡片**（音乐助手 / 歌词 / 正在播放 / 播放队列 / 定时任务 / 记忆）要能
  *   1) 自由拉伸（Pane 之间的分隔条调高度，两列之间调宽度）
  *   2) 合并成标签页（一个 Pane 内放多张卡片，Tab 切换）
  *   3) 隐藏 / 恢复
@@ -12,17 +12,18 @@
  */
 import { LS_KEYS } from './storage-keys';
 
-export type CardId = 'chat' | 'lyrics' | 'nowplaying' | 'queue' | 'tasks';
+export type CardId = 'chat' | 'lyrics' | 'memory' | 'nowplaying' | 'queue' | 'tasks';
 
 export const CARD_LABELS: Record<CardId, string> = {
 	chat: '音乐助手',
 	lyrics: '歌词',
+	memory: '记忆',
 	nowplaying: '正在播放',
 	queue: '播放队列',
 	tasks: '定时任务',
 };
 
-export const ALL_CARD_IDS: CardId[] = ['chat', 'lyrics', 'nowplaying', 'queue', 'tasks'];
+export const ALL_CARD_IDS: CardId[] = ['chat', 'lyrics', 'memory', 'nowplaying', 'queue', 'tasks'];
 
 export type Pane = {
 	id: string;
@@ -65,7 +66,7 @@ export type Layout = {
 const STORAGE_KEY = LS_KEYS.layout;
 
 /**
- * 默认布局：左列 = 音乐助手 / 歌词，右列 = 正在播放 / 播放队列 / 定时任务。
+ * 默认布局：左列 = 音乐助手 / 歌词 / 记忆，右列 = 正在播放 / 播放队列 / 定时任务。
  *
  * 每张卡默认各自独立成一格，**不预先合并成标签页**：这样分隔条、拖拽手柄、
  * 合并 / 拆分这些能力一进来就都有可操作对象，而不是藏在一层菜单后面。
@@ -75,13 +76,20 @@ const STORAGE_KEY = LS_KEYS.layout;
  * 默认隐藏**——隐藏等于新功能没人知道（`panel-layout.test.ts` 里那条
  * 「与 ALL_CARD_IDS 完全一致」的用例就是为此存在的）。老用户的布局不含这张卡，
  * 走的是另一条路：`sanitizeLayout` 会把它补进 `hidden`，从「卡片」菜单恢复。
+ *
+ * `memory`（⑥ 的界面）加在**左列末位**，紧挨着 `chat` —— 它是「助手记住了我什么」，
+ * 与对话是同一件事的两面（一个说、一个记），挨着放才读得出这层关系。
+ * ⚠️ 它在**左列**不是右列：右列那时已经 3 张卡，再塞一张会让每张都矮到只剩一行
+ * —— 「卡片里的主按钮被挤出可视区」那一类事故就是这么来的（按钮落在滚动区里，
+ * 点下去零反应、控制台零报错）。
  */
 export function defaultLayout(): Layout {
 	return {
 		columns: [
 			[
-				{ id: 'pane-chat', cards: ['chat'], active: 'chat', flex: 1.1 },
-				{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.5 },
+				{ id: 'pane-chat', cards: ['chat'], active: 'chat', flex: 1.15 },
+				{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.3 },
+				{ id: 'pane-memory', cards: ['memory'], active: 'memory', flex: 0.8 },
 			],
 			[
 				{ id: 'pane-nowplaying', cards: ['nowplaying'], active: 'nowplaying', flex: 1.25 },

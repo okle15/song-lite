@@ -16,7 +16,7 @@
 | 目录 | 放什么 |
 |:---|:---|
 | `app/` | 路由 + 页面外壳。`page.tsx` 是**服务端外壳**（读一次对话历史当 props 递下去，因此没有 `'use client'`，且必须 `export const dynamic = 'force-dynamic'`）；`home-client.tsx` 是浏览器主体；`app/api/**/route.ts` 每个只做「解析参数 → 调域逻辑 → 包信封」 |
-| `components/` | 浏览器侧组件与纯函数模块（**不设 `lib/` 子目录**）。需要 React 渲染的不写单测，无 React 依赖的纯模块要写（`panel-layout.ts`、`storage-keys.ts`、`approval-view.ts` —— 凡是「选错一档就不报错」的判定，都该提到 `.ts` 里来） |
+| `components/` | 浏览器侧组件与纯函数模块（**不设 `lib/` 子目录**）。需要 React 渲染的不写单测，无 React 依赖的纯模块要写（`panel-layout.ts`、`storage-keys.ts`、`approval-view.ts`、`memory-view.ts` —— 凡是「选错一档就不报错」的判定，都该提到 `.ts` 里来） |
 | `contract/` | 前后端**共享契约**，零业务依赖。前端能引用的服务端类型只能来自这里 |
 | `agent/` | Agent 本体：`provider`（接入）/ `run`（循环）/ `tools`（工具）/ `prompt`（提示词）。**不 import `server/`**——工具用 HTTP 打自家 BFF。十个部件的落点见 [BLUEPRINT.md](./BLUEPRINT.md) |
 | `server/` | 业务实现。根只留 `http.ts`（信封）与 `db.ts`（连接），其余归入 `agent/ library/ player/ records/` |
@@ -239,6 +239,22 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
 - **加一条路由 = 三处**：① `app/api/**/route.ts`；② README 的「API 一览」表（标题里那个数字也要改）；
   ③ 决定它进不进冒烟 —— 进的话记得**它写不写真实状态**（见上面那条）。
   **只增路由不改表**是最容易漏的，而不改的后果是"这个接口没人知道它存在"（不报错）。
+- **加一张卡 = 四处，其中两处不报错**：
+  ① `components/panel-layout.ts` 的 `CardId` / `CARD_LABELS` / `ALL_CARD_IDS` / `defaultLayout()`。
+  ⚠️ **往 `ALL_CARD_IDS` 里漏一个是不报错的**：`sanitizeLayout` 按它过滤（不认识的 id 直接丢），
+  卡片于是**永远进不了任何布局**；而 `panel-layout.test.ts` 那条「defaultLayout 与 `ALL_CARD_IDS`
+  完全一致」拿的正是同一个清单 —— **两边一起漏就一起绿**。
+  ② `components/LayoutMenu.tsx` 的 `CARD_HINTS`（"这张卡是干什么的"）。**这一处 tsc 会拦**
+  （它是 `Record<CardId, string>`，少一个键就 TS2741）—— 2026-09-24 加 `memory` 时就是它先红的，
+  所以**先改 ① 再跑 tsc**，能白捡一次检查。
+  ③ `app/home-client.tsx` 的 `renderCard` 加 `case`。⚠️ **漏了不报错，且症状像"卡片是空的"**：
+  那个 `switch` 没有 `default`，函数返回类型是推断出来的，而 tsconfig 里**没开
+  `noImplicitReturns`** → 走到头返回 `undefined` → React 渲染成一片空白。卡片壳在、标题在、
+  里面什么都没有，控制台一条报错都没有。
+  ④ 新卡默认放**哪一列**：判据是同列已经有几张 —— 右列挤到 4 张时每张都矮到只剩一行，
+  「卡片里的主按钮被挤出可视区」那类事故就是这么来的（见 `panel-layout.ts` 的 `defaultLayout`）。
+  老用户那份布局里没有新卡，走的是既定的升级路径：`sanitizeLayout` 把它补进 `hidden`，
+  从「卡片」菜单恢复（`panel-layout.test.ts` 有一条用例专门守着这条路）。
 - **给一个工具加确认闸门要同时改四处，其中两处「不写对也不报错」**：
   ① `agent/run.ts` 的 `toolApproval`（`streamText` 的**原生选项**，与 `stopWhen` 同一层）
   里加一行 `工具名: 'user-approval'`。

@@ -207,9 +207,14 @@ test('未知卡片：hidden 里的未知 id 被过滤掉', () => {
  * 老用户的 localStorage 里是一份不含新卡的布局：新卡的 id **两个列表都没有**。
  * 若不处理，`LayoutMenu` 里点「恢复」会撞上 `restoreCard` 的守卫、静默无反应 ——
  * 又一次「结构自洽但语义错误」：状态、控制台、类型检查三处都看不出不对。
+ *
+ * ⚠️ 加第 6 张卡（`memory`）时这条**真的红了一次**，而它红得对：它原本把期望写成
+ * 字面量 `['tasks']`，那是把**当天的快照**当成了判据。判据其实是「**凡缺席的**已知
+ * 卡片都进可恢复列表」，所以下面改成从 `ALL_CARD_IDS` 推 —— 下一次加卡它只会因为
+ * 「真出了这个问题」而红，不会因为「少改了一个字面量」而红。
  */
 test('老布局升级：缺席的已知卡片会进可恢复列表，点一下能真的恢复', () => {
-	// 一份「加 tasks 之前」的布局：五张卡里只收录了四张
+	// 一份更早版本的布局：只收录了当时存在的四张，`tasks` / `memory` 都还没有
 	const l = loadWithStored({
 		columns: [
 			[
@@ -232,12 +237,22 @@ test('老布局升级：缺席的已知卡片会进可恢复列表，点一下�
 		['chat', 'lyrics', 'nowplaying', 'queue'],
 		'恢复默认之外的卡片不该被凭空塞进列里',
 	);
-	assert.deepEqual(l.hidden, ['tasks'], '缺席的卡必须出现在「可恢复」列表里');
+	// 期望从 `ALL_CARD_IDS` 推，不写字面量 —— 判据是「**凡**缺席的已知卡片都进
+	// 可恢复列表」，所以这一版会同时覆盖 `tasks` 与 `memory` 两张。写死列表的话，
+	// 加下一张卡时它会红，而那次红**不代表出了问题**（是快照过期），白白消耗一次注意力。
+	assert.deepEqual(
+		l.hidden,
+		ALL_CARD_IDS.filter((c) => !allCards(l).includes(c)),
+		'缺席的卡必须**全部**出现在「可恢复」列表里',
+	);
 
 	// 2) 从菜单点「恢复」必须真的把它放回来（旧实现会静默 return layout）
 	const restored = restoreCard(l, 'tasks');
 	assert.ok(allCards(restored).includes('tasks'), '「恢复」必须真的把它放进布局');
-	assert.deepEqual(restored.hidden, [], '恢复之后不该还留在 hidden 里');
+	// 只断言**这一张**出去了：`hidden` 里还有别的缺席卡（这个场景里是 `memory`），
+	// 那是它们本来就该在的地方，用 `deepEqual(hidden, [])` 会把「恢复了一张」
+	// 与「恢复完了」混为一谈。
+	assert.ok(!restored.hidden.includes('tasks'), '恢复过的那张不该还留在 hidden 里');
 });
 
 /**

@@ -53,7 +53,7 @@
 | ③ | **工具** | 模型能做的每一件事，一个工具一件 | `agent/tools.ts` | 🟢 活跃 |
 | ④ | **提示词** | 行为约束：做不到什么、不许写什么。正文分**两层**：`CORE`（身份 + 能力边界 + 铁律）与 `PATCHES`（**会过时的那一层**，可用 `PROMPT_DISABLE` 单独关掉） | `agent/prompt.ts` | 🟢 活跃 |
 | ⑤ | **会话历史** | 刚才聊了什么（每轮读回重发） | `server/agent/message-log.ts`（存 + 读回）+ `agent/run.ts`（转成模型消息并裁剪） | 🟢 活跃 |
-| ⑥ | **记忆** | 关于你的持久事实（跨会话） | 四件套：`contract/preference.ts`（key 归一化）+ `server/agent/preference-log.ts`（存与读）+ `agent/tools.ts` 的 `remember/forget_preference`（**写**）+ `agent/prompt.ts` 的 `preferenceLines`（**注入**） | 🟢 活跃 |
+| ⑥ | **记忆** | 关于你的持久事实（跨会话）。三面齐全：**写**（记不记由模型判断，铁律 6）· **用**（每轮注入提示词）· **看**（「记忆」卡：列出来、逐条撤回）。⚠️ 缺「看」的那一版有个说不出口的后果 —— 提示词自己写着「记错比不记更糟……而**用户不知道你记了什么**」（2026-09-24 补上第三面） | 五件套：`contract/preference.ts`（key 归一化）+ `server/agent/preference-log.ts`（存与读）+ `agent/tools.ts` 的 `remember/forget_preference`（**写**）+ `agent/prompt.ts` 的 `preferenceLines`（**注入**）+ `components/MemoryCard.tsx`（**看**，走同一个 `/api/preferences`，所以「模型看到的」与「用户看到的」是同一份） | 🟢 活跃 |
 | ⑦ | **上下文装配** | 每轮把"此刻的事实"拼进请求 | `agent/prompt.ts` 的 `stateLines`（拼装面）+ `server/player/prompt-snapshot.ts`（**按真相来源分流**：状态 / 曲目 / 队列现取，音量 / 播放方式取设备上报） | 🟢 活跃 |
 | ⑨ | **观测** | 知道它哪次答错、慢在哪、花了多少，**并按「用的是哪份提示词」分组**（`prompt_version` / `prompt_disabled`；加列前的老行留 NULL = 无从得知）。另含**首字延迟**（`first_token_ms`，NULL = 一个字都没吐）、**逐 span**（`agent_spans`，一行 = 一轮里的一步）与**钱**（`model` + `cost_micro`，**同一行同一次写入**——价格随模型走）。最后还有一层**归因**：把上面那些数字排成**一句能据以行动的话**（"这一轮为什么是这样、下一步动哪儿"），并按「谁来修」把环境类与行为类分开 | `server/agent/turn-log.ts`（写与读）+ `agent/run.ts` 的 `onChunk` 钩子（首字延迟；**只挂观察钩子，不动 ② 的循环形状**）+ `app/api/agent/route.ts` 的 `onEnd`（取数）+ `server/agent/pricing.ts`（价目表）+ `server/agent/diagnose.ts`（**归因**，纯函数）+ `scripts/turns.mts`（看） | 🟢 活跃 |
 | ⑩ | **触发器** | 不经用户说话也能唤醒它。落的是「**任务**」这个概念（跨轮的目标：推到哪儿了、下次该不该继续），**不是定时器**——定时器属于部署环境。重复方式三档 `none` / `daily` / `weekly`（`weekly` 可指定"哪几天"，没说就是"每周同一天"） | 四件套：`server/agent/tasks.ts`（`tasks` 表读写 + **原子认领** + 租约回收 + 重复规则的推进）+ `app/api/tasks/route.ts`（排 / 看 / 撤 = 对用户的**承诺**）+ `app/api/tasks/tick/route.ts`（**执行** = 外部打点）+ `agent/tools.ts` 的 `schedule_task / list_scheduled_tasks / cancel_scheduled_task` | 🟢 活跃 |
@@ -93,6 +93,7 @@
 | 让它「按刚才说的条件组一批队列」 | ③ **+ ⑦** | `build_queue`：先搜（`/api/library/search`）→ 再换队列（`POST /api/player/queue`）→ 再开播。**队列第一次不等于整库**（`QueueSource` 的 `custom`），⑦ 里还要写明「按什么挑的一批」，否则下一轮它不知道这队列从哪来 |
 | 让它「小声一点」/「单曲循环」 | ③ **+ ⑦** | `set_volume` / `set_playback_mode` 打自家 `/api/player/settings`。**相对量必须先在 ⑦ 露出基准值**（「音量：80%」），否则「一点」无从判断。注意这是**设备侧设定**：真相在本机 `localStorage` + `<audio>`，服务端只有镜像（见 §5 与 AGENTS「数据与持久化」） |
 | 让它「把库里的歌列全」 | ③ | `search_library` 的 `limit` 只是单页上限，配 `offset` 翻页；输出必须写「本页第 X–Y 首 / 还有 N 首」。**静默截断**是曲库长大后的默认故障——现在 6 首看不出来 |
+| 让用户看见 / 撤回它记住的东西 | ⑥ 的**读侧**（不是 ③） | **不用新工具，也不用新路由**：`GET /api/preferences` 早就在，缺的只是界面（`components/MemoryCard.tsx`）。⚠️ 加「读」之前先确认那个 API 是不是已经存在 —— 2026-09-24 这张卡的全部后端都是现成的，一行路由都没动 |
 | 让界面显示封面 / 歌词 | 与 §2 无关 | 这是前端 + `app/api/library/{cover,lyrics}`，**十个部件一个都不动** |
 
 **注意 ③ 和 ④ 占掉了绝大多数行**，而这两块**完全不碰模型交互**：加一个工具就是写个
@@ -131,7 +132,7 @@ app/
   page.tsx        服务端外壳（无 'use client'）：读一次 ⑤，把历史当 props 递给下面
   home-client.tsx 浏览器主体（'use client'）—— 其余所有前端代码都在这里
   api/            ⑧ 传输边界（路由 = HTTP 面）
-components/     浏览器侧（不 import server/）
+components/     浏览器侧（不 import server/）；要 React 渲染的不写单测，**无 React 依赖的纯模块要写**（`memory-view.ts` / `approval-view.ts` 就是为此从组件里提出来的）
 contract/       跨端共享的纯类型（零依赖）
   track-tags.ts   「什么算同一个标签」的唯一出处（工具侧 / 存储侧 / 打标脚本共用）
 server/         业务逻辑

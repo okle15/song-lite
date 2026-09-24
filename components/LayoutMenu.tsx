@@ -20,6 +20,7 @@ import { CheckIcon, GridIcon } from './icons';
 
 const CARD_HINTS: Record<CardId, string> = {
 	chat: '用说话的方式放歌、切歌',
+	memory: '它记住了你什么，可逐条忘掉',
 	nowplaying: '大封面、进度与播放控制',
 	queue: '当前播放队列，点击切歌',
 	lyrics: '当前曲目歌词，随播放滚动',

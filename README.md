@@ -33,6 +33,11 @@ npm run build && npm start -- -p 3100
 **没有**（曾有过，2026-09-15 随最简化删除）：电台、偏好设置、语音输入、
 MV 视频播放、统计概览。**AI 打标回来了，但换了形态**：不再依赖不可信的 ID3 `TCON`，
 改由 `track_tags` 表承载（AI 打底 + 用户覆盖）——重跑打标**不会覆盖用户手改过的标签**。
+**「记忆」卡（2026-09-24）不是"偏好设置"回来了** —— 两者判据不同：那张被删的表单问的是
+「用户想配置什么」，这张卡问的是「**AI 已经记下了什么、能不能撤**」。它是 ⑥ 的**读侧**，
+只做「列出 + 逐条删」，**没有手动新增的入口**（偏好是 agent 对用户的理解，不是用户填的配置项）。
+动机写在 `agent/prompt.ts` 铁律 6 的原文里：**记错比不记更糟 —— 它会长期影响以后每一次对话，
+而用户不知道你记了什么**。那个「不知道」在此之前没有任何出口。
 
 **Agent**：对话是布局系统里的一张普通卡（`chat`，⌘K 唤起），协议交给 Vercel AI SDK
 （`/api/agent`）。当前有 **17 个工具**（数的是 `createTools` 的注册表键，全部外置，没有内联工具）：
@@ -41,7 +46,8 @@ MV 视频播放、统计概览。**AI 打标回来了，但换了形态**：不�
 认知写入 3 个（记住 / 忘掉偏好、增删曲目标签）、只读回顾 2 个（播放历史、标签一览）、
 **排期 3 个**（排 / 看 / 撤，见 ⑩）。
 另有**会话历史**（跨刷新保留，发送前裁掉历史轮的工具轨迹）与**记忆**（长期偏好跨对话注入
-系统提示词）。系统提示词的实时状态块里带着**队列窗口**（当前附近几首 + 「前 / 后 N 首略」，
+系统提示词，**并在「记忆」卡上列出来、可逐条撤回** —— 见下面「没有」那段里
+「为什么这不是偏好设置回来了」的辨析）。系统提示词的实时状态块里带着**队列窗口**（当前附近几首 + 「前 / 后 N 首略」，
 自定义队列还会写明「按什么挑的一批」）、**当前音量与播放方式**、以及**现在的时刻**——
 `jump_in_queue` 的「第几首」、`set_volume` 的「小声点」都照它数/算，而 `schedule_task`
 要的绝对时间由模型自己算（所以它看得到「现在」，且工具会把服务端规范化后的时间念回去）。
@@ -102,7 +108,7 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 | POST | `/api/player/queue` | **换一批队列**：`{trackIds, label}` 换成自定义队列并开播；**`{trackIds: []}`（或省略）= 恢复整个曲库**。agent 的 `build_queue` 走这里 |
 | GET/POST | `/api/player/settings` | **音量 / 播放方式**。GET 读当前值；POST `{volume?, mode?, shuffle?}`（0–1，越界夹紧；只改给了的字段）。agent 的 `set_volume` / `set_playback_mode` 走这里 |
 | GET | `/api/history?limit=` | 播放历史，时间倒序（默认 20，上限 200） |
-| GET/POST/DELETE | `/api/preferences` | **偏好（Agent 的长期记忆）**。GET 列出；POST `{key, value}` 记住一条（同 key 覆盖）；DELETE `?key=` 忘掉一条。agent 的 `remember` / `forget_preference` 工具走的就是这里 |
+| GET/POST/DELETE | `/api/preferences` | **偏好（Agent 的长期记忆）**。GET 列出；POST `{key, value}` 记住一条（同 key 覆盖）；DELETE `?key=` 忘掉一条。agent 的 `remember` / `forget_preference` 工具走的就是这里，**界面的「记忆」卡也是** —— agent 与浏览器共用同一个 API 面（同一套校验、同一个信封），所以两边看到的必然是同一份，不存在"第二套入口各自漂移" |
 | GET/POST/PATCH | `/api/tasks` | **⑩ 排期（对用户的承诺）**。GET 列出（未完成的按该做的时间在前 + 最近做过的几条）；POST `{goal, dueAt, repeat?, repeatDays?}` 排一件（`dueAt` 必须是 ISO 8601——**不接受自然语言**，否则"现在几点"会有两份算法；`repeat` ∈ `none` / `daily` / `weekly`，`weekly` 不传 `repeatDays` 就是"每周同一天"、传了则给 0–6 的星期号，如 `[1,3,5]`）；PATCH `{id}` 撤销一件还没做完的（撤一件已完成的不算错，回 `cancelled:false`）。**参数错一律回 400 而不是 500**，判据与消息都由 `server/agent/tasks.ts` 的 `validateCreate` 给（400 = 模型换个说法就能改，500 = 服务端坏了、原样重试也没用）。⚠️ **重复任务的第一个落点也会被推到未来**：模型把时间算到了过去（实测确实会，且星期几还是对的）时，这行不会带着过去的 `due_at` 入库、然后被下一次 tick **立刻执行**——建表就复用 `nextRepeatDue`，与重排走同一条规则；一次性的（`none`）**不推**，"已经晚了就现在做"正是用户要的。agent 的 `schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 走这里。⚠️ **执行不在这条路由**，见下 |
 | POST | `/api/tasks/tick` | **⑩ 的执行面（打点）**。认领**一件**到期任务并跑一轮完整对话，`ran:false` = 这次没活干（正常结果）。刻意没有常驻定时器：**谁来打点都行**（cron / `npm run tasks:tick`），正确性由原子认领保证，不由"只有一个人在打点"这个假设保证。网关没配时**先挡在认领之前**（不白费 `attempts`）。一次只跑一条——一轮 7–14 秒，一次请求跑 N 条会撞平台超时，那时前面几条的副作用已经发生了 |
 | POST | `/api/agent` | **对话端点**（SSE）。body `{messages, snapshot}`——`snapshot` **只用来取设备侧的四项**（音量 / 播放方式 / 随机 / 进度），曲目与队列服务端自己知道（见 `server/player/prompt-snapshot.ts`）；协议是 AI SDK 的 UI 消息流（响应头 `x-vercel-ai-ui-message-stream: v1`），收尾是**裸** `data: [DONE]`。另回两个自定义头 **`x-prompt-version` / `x-prompt-disabled`**——那是本轮实际用的系统提示词（`npm run cases` 拿它当报告标题，比自己 import 源码算一遍可靠：服务可能正跑着上一次构建的产物） |
