@@ -73,6 +73,7 @@ function turn(id: string, over: Record<string, unknown> = {}) {
 		toolCalls: 1,
 		tools: [{ name: 'build_queue', ms: 30, ok: true }],
 		truncated: false,
+		budgetHit: false,
 		aborted: false,
 		finishReason: 'stop',
 		ms: 1200,
@@ -308,12 +309,22 @@ test('老库升级：按旧形状建的表，migrate 之后版本列必须补上
 		process.env.APP_DB_PATH = oldFile;
 		closeDb();
 
-		recordTurn(turn('after-migrate', { promptVersion: 'beef1234', promptDisabled: 'work_style' }));
+		recordTurn(
+			turn('after-migrate', {
+				promptVersion: 'beef1234',
+				promptDisabled: 'work_style',
+				// 后加的列一起带上：**漏登记 `ADDED_COLUMNS` 时这一行根本写不进去**
+				// （ALTER 没跑 → 列不存在 → INSERT 抛 → 被 recordTurn 吞成一行 log），
+				// 于是下面的 `fresh` 断言会红。这是那条纪律的守门点。
+				budgetHit: true,
+			}),
+		);
 
 		const rows = recentTurns(10);
 		const fresh = rows.find((r) => r.id === 'after-migrate');
 		assert.ok(fresh, ' migrate 之后写入必须成功——为 null 说明 INSERT 被 recordTurn 吞了，观测会静默停摆');
 		assert.equal(fresh.promptVersion, 'beef1234');
+		assert.equal(fresh.budgetHit, true, 'budget_hit 也必须跟着 ALTER 补上');
 
 		const legacy = rows.find((r) => r.id === 'legacy');
 		assert.ok(legacy, '老数据不能被迁移弄丢');
@@ -321,6 +332,7 @@ test('老库升级：按旧形状建的表，migrate 之后版本列必须补上
 		assert.equal(legacy.model, null, '同理：老行用的哪个模型也无从得知');
 		assert.equal(legacy.costMicro, null, '成本 null = 不知道，不是 $0');
 		assert.equal(legacy.firstTokenMs, null);
+		assert.equal(legacy.budgetHit, false, '老行 = 那时还没有闸门，确实没撞过（NULL 读成 false 是对的）');
 		assert.equal(legacy.userText, '加列之前的一句');
 	} finally {
 		closeDb();
@@ -522,4 +534,32 @@ test('落库再读回，kind 不丢（写入是 JSON，读取只在 ok===false �
 		undefined,
 		'成功 / 老行读出来都是 undefined —— 那是一回事',
 	);
+});
+
+test('summarizeSteps：budgetHit 只透传调用方给的布尔，不从 steps 反推', () => {
+	// 五步、最后一步仍在要工具 —— 形状与"撞步数上限"一模一样，
+	// 而这正是**不能靠反推**的原因：光看 steps 分不出是哪一种上限。
+	const steps: StepLike[] = Array.from({ length: 5 }, () => step('tool-calls', [['x', 1, true]]));
+	assert.equal(summarizeSteps(steps, { maxSteps: 5 }).budgetHit, false);
+	assert.equal(summarizeSteps(steps, { maxSteps: 5, budgetHit: true }).budgetHit, true);
+});
+
+test('budgetHit：落库 → 读回不丢；不带时默认 false', () => {
+	recordTurn(turn('budget-yes', { budgetHit: true }));
+	assert.equal(recentTurns(1)[0].budgetHit, true);
+
+	recordTurn(turn('budget-default'));
+	assert.equal(recentTurns(1)[0].budgetHit, false, '夹具默认没撞预算');
+});
+
+test('budgetHit 与 truncated 是两列、互不覆盖（合成一列就分不出该改哪个上限）', () => {
+	recordTurn(turn('both-hits', { truncated: true, budgetHit: true }));
+	const row = recentTurns(1)[0];
+	assert.equal(row.truncated, true);
+	assert.equal(row.budgetHit, true);
+
+	recordTurn(turn('only-budget', { truncated: false, budgetHit: true }));
+	const other = recentTurns(1)[0];
+	assert.equal(other.truncated, false);
+	assert.equal(other.budgetHit, true, '只撞预算的那一轮，truncated 必须是 false');
 });

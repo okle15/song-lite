@@ -13,6 +13,22 @@
  * 换成「跑两遍看数字」。`LEARNING.md` §3.2 否掉的正是另一种形态（一批固定问题 +
  * 期望答案 → 一个准确率）：准确率不改变任何行动，而「这条可以删了」会。
  *
+ * ── 「把两次放在一起看」原本要靠人眼，现在交给 `cases:diff` ─────────────
+ * 本文件**只跑一版**（它只认识一个 `BASE`）。要下结论需要两份报告，于是本文件负责
+ * 把这一版落成 JSON（`CASES_REPORT=<path>`），`scripts/cases-diff.mts` 负责对比两份
+ * JSON 并给出「可以删 / 保留 / 测不出」—— 下面那句「单版只能给一半」说的是这件事。
+ *
+ *   APP_DB_PATH="C:/tmp/a.db" npm start -- -p 3200
+ *   BASE=http://127.0.0.1:3200 CASES_REPORT=full.json   CASES_LABEL=full \
+ *     npm run cases
+ *   APP_DB_PATH="C:/tmp/b.db" PROMPT_DISABLE=work_style npm start -- -p 3201
+ *   BASE=http://127.0.0.1:3201 CASES_REPORT=no-ws.json CASES_LABEL=no-work_style \
+ *     npm run cases
+ *   npm run cases:diff -- full.json no-ws.json
+ *
+ * `CASES_LABEL` 只是给人看的标签（默认由响应头的 `x-prompt-disabled` 推出来）；
+ * **对比的方向不看它，看 `disabled`** —— 手写的标签可能写反，响应头不会。
+ *
  * ── 为什么是脚本，不是 API + 页面 ──────────────────────────────────────
  * 与 `turns.mts` / `auto-tag.mts` 同一个判断：这是**给开发者自己看的**东西。
  * 加一条 API 要顺带更新 README 的接口清单、加一条冒烟用例，而它真正被用到的场合是
@@ -37,7 +53,9 @@
  * 盘符，临时库落到 `C:\c\...`，然后你会"查不到那个文件"，见 AGENTS.md。）
  *
  * 环境变量：`BASE`（必填）· `CASES_REPEAT=N`（每条跑 N 遍，全过才算过 —— 模型是随机的，
- * 一次跑一遍不足以下结论）· `CASE_TIMEOUT_MS`（单条超时，默认 120s）。
+ * 一次跑一遍不足以下结论）· `CASE_TIMEOUT_MS`（单条超时，默认 120s）·
+ * `CASES_REPORT=<path>`（把这次跑落成 JSON，给 `cases:diff` 读）·
+ * `CASES_LABEL=<text>`（这一版的自称，只为在对比表里认得出来）。
  *
  * ── 判据只落在「可观察的事实」上 ─────────────────────────────────────
  * 调了哪个工具、工具成没成功、回答里有没有某个字符串、走了几步。**不判"答得好不好"**：
@@ -45,9 +63,17 @@
  * 「它多聪明」，是「这条补丁还在不在起作用」。
  * 判据词汇表见 `cases/failure-cases.json` 的 `_about`。
  *
- * 退出码：0 = 全部通过；1 = 有 FAIL；2 = 用法/环境不对（没给 BASE、目标打不通）。
+ * 退出码：0 = 全部通过；1 = 有 FAIL；2 = 用法/环境不对（没给 BASE、目标打不通、报告写不出）。
  */
 import { readFileSync } from 'node:fs';
+
+import {
+	REPORT_KIND,
+	REPORT_SCHEMA,
+	type CaseResult,
+	type CasesReport,
+	writeReport,
+} from '../cases/report';
 
 /* ── 案例集的形状（与 cases/failure-cases.json 对齐）──────────────────── */
 
@@ -123,6 +149,21 @@ const CASE_TIMEOUT_MS = Number(process.env.CASE_TIMEOUT_MS) || 120_000;
  * "它这次恰好做到了"。
  */
 const REPEAT = Math.max(1, Number(process.env.CASES_REPEAT) || 1);
+
+/**
+ * 把这次跑落成 JSON 的落点（`CASES_REPORT`）。空 = 不落盘（默认行为不变）。
+ *
+ * 为什么是「脚本自己写文件」而不是「脚本输出、由人贴进报告」：这份 JSON 的消费者是
+ * 另一个进程（`cases:diff`），中间任何一次手工搬运都会把"跑的是哪一版"这件事弄丢
+ * —— 而那正是这组对比的全部意义。
+ */
+const REPORT_PATH = (process.env.CASES_REPORT ?? '').trim();
+
+/** 这一版的自称（`CASES_LABEL`）。空 = 由响应头 `x-prompt-disabled` 推出来。 */
+const LABEL = (process.env.CASES_LABEL ?? '').trim();
+
+/** 这次跑的起点。写进报告，用来判断"这两份是不是一轮里的"（同一天的两个文件才像一对）。 */
+const STARTED_AT = new Date().toISOString();
 
 /**
  * 每个 case 的设备侧快照 —— **脚本就是那台"浏览器"**。
@@ -444,6 +485,47 @@ function shownRun(row: Row): Run {
 
 const avg = (nums: number[]): number => Math.round(nums.reduce((a, b) => a + b, 0) / nums.length);
 
+/** 一条 case 落进报告的样子。展示字段与判定字段**分开写**，理由见 `cases-report.mts` 头注。 */
+function toCaseResult(row: Row): CaseResult {
+	return {
+		id: row.c.id,
+		guards: row.c.guards,
+		input: row.c.input,
+		pass: row.verdict.pass,
+		// 从每一遍的 verdict 数出来，而不是把循环里的局部变量往上带 —— 少一个要同步的地方。
+		passed: row.attempts.filter((a) => a.verdict.pass).length,
+		repeat: REPEAT,
+		// 已经是「第 N 遍：…」的形态（主循环里拼的），这里不再重排。
+		problems: row.verdict.problems.map((p) => ({ text: p.text, infra: p.infra === true })),
+		steps: row.attempts.map((a) => a.run.steps),
+		ms: row.attempts.map((a) => a.run.ms),
+		chains: row.attempts.map((a) => chain(a.run.tools)),
+	};
+}
+
+/** `x-prompt-disabled` 是逗号拼的（`route.ts` 的 `disabled.join(',')`）：空串 = 全部启用。 */
+function splitDisabled(header: string | null): string[] | null {
+	// ⚠️ **没回这个头 ≠ 回了空串**：前者是"不知道"，后者是"全部启用"。合成一个空数组，
+	// 读侧就会把"判不出方向"读成"这一版带全部补丁"—— 一个缺字段的报告会因此
+	// 变成「补丁还在起作用，保留」。返回 null 让那个区别一路传到读侧。
+	if (header === null) return null;
+	return header.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * 这一版的自称：没给 `CASES_LABEL` 时从响应头推一个（**只为在对比表里认得出来**）。
+ *
+ * 注意它接受的是**整份取值列表**而不是一个值：一次跑里出现两个取值时（中途换过配置）
+ * 贴哪个都不对，那就退成一句"说不清"—— 标签是给人看的，但它不能说谎。
+ */
+function defaultLabel(headers: (string | null)[]): string {
+	if (headers.length === 0) return '（无 disabled 头）';
+	if (headers.length > 1) return '（中途换过配置）';
+	const d = splitDisabled(headers[0]);
+	if (d === null) return '（无 disabled 头）';
+	return d.length ? `off:${d.join('+')}` : 'full';
+}
+
 console.log(`\n失败案例集  BASE=${BASE}  ·  共 ${cases.length} 条 · 每条 ${REPEAT} 遍`);
 console.log('─'.repeat(96));
 
@@ -591,5 +673,38 @@ if (patchGroups.length > 0) {
 const failed = rows.filter((r) => !r.verdict.pass).length;
 console.log(`\n合计：通过 ${rows.length - failed} · 失败 ${failed}`);
 console.log('（每条判据的「为什么落在这个工具上」写在 cases/failure-cases.json 的 why 里）\n');
+
+/* ── 落盘（`CASES_REPORT`）────────────────────────────────────────────── */
+
+if (REPORT_PATH) {
+	const report: CasesReport = {
+		kind: REPORT_KIND,
+		schema: REPORT_SCHEMA,
+		label: LABEL || defaultLabel(disabledSet),
+		base: BASE,
+		// 上面那两行控制台输出已经判过一致性；报告里**照样记原值**，让读侧自己判 ——
+		// 「这一版能不能比」这件事必须在读侧也有据可依，不能只活在终端里。
+		versions,
+		disabled: disabledSet.map((d) => splitDisabled(d)),
+		repeat: REPEAT,
+		startedAt: STARTED_AT,
+		finishedAt: new Date().toISOString(),
+		cases: rows.map(toCaseResult),
+	};
+	try {
+		writeReport(REPORT_PATH, report);
+		console.log(`报告已落盘：${REPORT_PATH}  （标签 ${report.label} · v:${versions[0] ?? '（无）'}）`);
+		console.log('两份到手后：npm run cases:diff -- <这份> <另一份>\n');
+	} catch (err) {
+		// **不静默、且非零退出**：写不出去时那个路径上多半还留着**上一次**的报告，
+		// 下游 cases:diff 会拿它当这次的结果，给出一句关于旧数据的结论。
+		// 那比"没有报告"糟得多 —— 没有报告你会去重跑，有旧报告你会直接信。
+		console.error(
+			`\n⚠️ 报告写不出去：${err instanceof Error ? err.message : String(err)}` +
+				`\n   ${REPORT_PATH} 上若还留着上一次的报告，cases:diff 会把它当成这次的结果。\n`,
+		);
+		process.exit(2);
+	}
+}
 
 process.exit(failed > 0 ? 1 : 0);

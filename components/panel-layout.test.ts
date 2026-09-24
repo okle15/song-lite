@@ -20,6 +20,7 @@ import {
 	hideCard,
 	loadLayout,
 	mergeInto,
+	restoreCard,
 	setActiveCard,
 	setColumnFill,
 	splitOut,
@@ -63,7 +64,7 @@ function paneOf(layout: Layout, card: CardId) {
 	return layout.columns.flatMap((c) => c).find((p) => p.cards.includes(card));
 }
 
-test('defaultLayout：四张卡各占一格，与 ALL_CARD_IDS 完全一致', () => {
+test('defaultLayout：全部卡片各占一格，与 ALL_CARD_IDS 完全一致', () => {
 	const l = defaultLayout();
 	assert.deepEqual(allCards(l).sort(), [...ALL_CARD_IDS].sort());
 	// 每张卡各自独立成格：新加的卡片若被漏在默认布局外，用户只能去菜单里「恢复」，
@@ -161,8 +162,15 @@ test('未知卡片：只丢那一张，其余布局原样保留', () => {
 
 	assert.equal(l.colFlex, 0.7, '不应整体回退默认');
 	assert.deepEqual(l.colFill, [0.6, 1], '不应整体回退默认');
-	assert.deepEqual(allCards(l).sort(), [...ALL_CARD_IDS].sort(), '本项目的卡片一张都不能少');
 	assert.ok(!(allCards(l) as string[]).includes('overview'), '未知卡片应被丢弃');
+	// 不变式：**每张已知卡片要么在布局里、要么在可恢复列表里**，不能凭空消失。
+	// 比原来的「一张都不能少」更准确 —— 缺席的卡（这份外来布局里没有 `tasks`）
+	// 该去 hidden，而不是被塞进用户调好的列里。
+	assert.deepEqual(
+		[...allCards(l), ...l.hidden].sort(),
+		[...ALL_CARD_IDS].sort(),
+		'已知卡片只能在「布局里」或「可恢复列表里」这两处之一',
+	);
 	// 幸存的 pane 保留，激活位回退到剩余卡片（原本指向 overview）
 	const pane = l.columns[0].find((p) => p.id === 'pane-overview');
 	assert.deepEqual(pane?.cards, ['chat']);
@@ -191,6 +199,71 @@ test('未知卡片：hidden 里的未知 id 被过滤掉', () => {
 	});
 	// overview 不认识 → 过滤；queue 已在布局里 → 也不算隐藏
 	assert.deepEqual(l.hidden, []);
+});
+
+/**
+ * **加新卡时的升级路径**（2026-09-24 加第 5 张卡 `tasks` 时才有这个形状）。
+ *
+ * 老用户的 localStorage 里是一份不含新卡的布局：新卡的 id **两个列表都没有**。
+ * 若不处理，`LayoutMenu` 里点「恢复」会撞上 `restoreCard` 的守卫、静默无反应 ——
+ * 又一次「结构自洽但语义错误」：状态、控制台、类型检查三处都看不出不对。
+ */
+test('老布局升级：缺席的已知卡片会进可恢复列表，点一下能真的恢复', () => {
+	// 一份「加 tasks 之前」的布局：五张卡里只收录了四张
+	const l = loadWithStored({
+		columns: [
+			[
+				{ id: 'pane-chat', cards: ['chat'], active: 'chat', flex: 1.1 },
+				{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.5 },
+			],
+			[
+				{ id: 'pane-nowplaying', cards: ['nowplaying'], active: 'nowplaying', flex: 1.25 },
+				{ id: 'pane-queue', cards: ['queue'], active: 'queue', flex: 1.25 },
+			],
+		],
+		colFlex: 0.58,
+		colFill: [1, 1],
+		hidden: [],
+	});
+
+	// 1) 不擅自改用户已经调好的布局：缺席的卡进 hidden，而不是插进某一列
+	assert.deepEqual(
+		allCards(l),
+		['chat', 'lyrics', 'nowplaying', 'queue'],
+		'恢复默认之外的卡片不该被凭空塞进列里',
+	);
+	assert.deepEqual(l.hidden, ['tasks'], '缺席的卡必须出现在「可恢复」列表里');
+
+	// 2) 从菜单点「恢复」必须真的把它放回来（旧实现会静默 return layout）
+	const restored = restoreCard(l, 'tasks');
+	assert.ok(allCards(restored).includes('tasks'), '「恢复」必须真的把它放进布局');
+	assert.deepEqual(restored.hidden, [], '恢复之后不该还留在 hidden 里');
+});
+
+/**
+ * `restoreCard` 的守卫本身也是判据所在：它曾经要求 `hidden.includes(card)` 才动手。
+ * 于是「既不在布局、也不在 hidden」的卡片点一下**什么都没发生**，而且不报错。
+ */
+test('restoreCard：既不在布局、也不在 hidden 的卡片也要能恢复（不许静默无反应）', () => {
+	// 形状自洽（active 都指向自己 cards 里的卡片），但两处都没有 tasks
+	const l: Layout = {
+		columns: [
+			[{ id: 'p1', cards: ['chat'], active: 'chat', flex: 1 }],
+			[{ id: 'p2', cards: ['queue'], active: 'queue', flex: 1 }],
+		],
+		colFlex: 0.58,
+		colFill: [1, 1],
+		hidden: [],
+	};
+	assert.ok(!allCards(l).includes('tasks'), '前置条件：布局里没有 tasks');
+	assert.ok(!l.hidden.includes('tasks'), '前置条件：hidden 里也没有（这正是那个形状）');
+
+	const restored = restoreCard(l, 'tasks');
+	assert.ok(allCards(restored).includes('tasks'), '不能原样返回 —— 用户会以为按钮坏了');
+	assert.equal(restored.columns.length, 2, '列数不该变');
+
+	// 已经在布局里的卡仍是空操作，不重复添加
+	assert.equal(restoreCard(restored, 'tasks'), restored);
 });
 
 test('重复卡片：只保留第一份，不整体回退', () => {

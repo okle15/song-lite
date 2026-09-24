@@ -12,16 +12,17 @@
  */
 import { LS_KEYS } from './storage-keys';
 
-export type CardId = 'chat' | 'lyrics' | 'nowplaying' | 'queue';
+export type CardId = 'chat' | 'lyrics' | 'nowplaying' | 'queue' | 'tasks';
 
 export const CARD_LABELS: Record<CardId, string> = {
 	chat: '音乐助手',
 	lyrics: '歌词',
 	nowplaying: '正在播放',
 	queue: '播放队列',
+	tasks: '定时任务',
 };
 
-export const ALL_CARD_IDS: CardId[] = ['chat', 'lyrics', 'nowplaying', 'queue'];
+export const ALL_CARD_IDS: CardId[] = ['chat', 'lyrics', 'nowplaying', 'queue', 'tasks'];
 
 export type Pane = {
 	id: string;
@@ -64,10 +65,16 @@ export type Layout = {
 const STORAGE_KEY = LS_KEYS.layout;
 
 /**
- * 默认布局：左列 = 音乐助手 / 歌词，右列 = 正在播放 / 播放队列。
+ * 默认布局：左列 = 音乐助手 / 歌词，右列 = 正在播放 / 播放队列 / 定时任务。
  *
- * 四张卡默认各自独立成一格，**不预先合并成标签页**：这样分隔条、拖拽手柄、
+ * 每张卡默认各自独立成一格，**不预先合并成标签页**：这样分隔条、拖拽手柄、
  * 合并 / 拆分这些能力一进来就都有可操作对象，而不是藏在一层菜单后面。
+ *
+ * `tasks`（⑩ 的界面）加在右列**末位**、权重给得比同列邻居小：它是「扫一眼有没有
+ * 排期、顺手撤掉一条」的卡，不需要和封面 / 队列平分高度。**放在默认布局里而不是
+ * 默认隐藏**——隐藏等于新功能没人知道（`panel-layout.test.ts` 里那条
+ * 「与 ALL_CARD_IDS 完全一致」的用例就是为此存在的）。老用户的布局不含这张卡，
+ * 走的是另一条路：`sanitizeLayout` 会把它补进 `hidden`，从「卡片」菜单恢复。
  */
 export function defaultLayout(): Layout {
 	return {
@@ -79,6 +86,7 @@ export function defaultLayout(): Layout {
 			[
 				{ id: 'pane-nowplaying', cards: ['nowplaying'], active: 'nowplaying', flex: 1.25 },
 				{ id: 'pane-queue', cards: ['queue'], active: 'queue', flex: 1.25 },
+				{ id: 'pane-tasks', cards: ['tasks'], active: 'tasks', flex: 0.85 },
 			],
 		],
 		colFlex: 0.58,
@@ -165,6 +173,16 @@ function sanitizeLayout(value: unknown): Layout | null {
 	const hidden = v.hidden.filter(
 		(c): c is CardId => ALL_CARD_IDS.includes(c) && !seenCards.has(c),
 	);
+	// 补齐「布局里没有、hidden 里也没有」的已知卡片 —— 这是**加新卡时的升级路径**。
+	//
+	// 老用户的 localStorage 里存着一份不含新卡的布局：新卡的 id 两个列表都没有，
+	// 于是 LayoutMenu 里点「恢复」会撞上 restoreCard 的守卫、**静默无反应**
+	// （2026-09-24 加第 5 张卡 `tasks` 时发现——这是"结构自洽但语义错误"的又一个样本）。
+	// 补进 hidden 而不是插进某一列：判断权交回用户，而不是替他改一份已经调好的布局
+	// （同理见上面「不认识的卡片只丢它自己，不整体回退」）。
+	for (const c of ALL_CARD_IDS) {
+		if (!seenCards.has(c) && !hidden.includes(c)) hidden.push(c);
+	}
 	// colFill 旧版本布局可能没有：缺省视为铺满（1）。
 	// 上限用 MAX_COL_FILL 而不是 1——> 1 是「卡片比列还高」的合法状态。
 	const rawFill = (v as { colFill?: unknown }).colFill;
@@ -418,9 +436,17 @@ export function hideCard(layout: Layout, card: CardId): Layout {
 	return { ...layout, columns: draft, hidden };
 }
 
-/** 恢复被隐藏的卡片：放进较短的那一列末尾。 */
+/**
+ * 确保某卡片出现在布局里：不在布局中（无论是被隐藏、还是根本没被那份布局收录）
+ * 就放进较短的那一列末尾；已经在布局里则原样返回。
+ *
+ * ⚠️ 这里**不能**再要求 `hidden.includes(card)` 才动手。曾经的守卫是
+ * 「不在 hidden 里就 return layout」，于是「布局里没有、hidden 里也没有」的卡片
+ * 点一下**毫无反应**——加第 5 张卡时老用户的布局正是这个形状（见 `sanitizeLayout`
+ * 末尾的补齐逻辑）。语义上「恢复」就是「让它可见」，返回值里本来就会把它从
+ * `hidden` 摘掉，不存在残留。
+ */
 export function restoreCard(layout: Layout, card: CardId, col?: ColumnIndex): Layout {
-	if (!layout.hidden.includes(card)) return layout;
 	if (locate(layout, card)) return layout; // 已在布局中
 
 	const target: ColumnIndex =

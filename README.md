@@ -76,8 +76,10 @@ server/         业务实现。根只留 http.ts（信封）与 db.ts（连接�
   player/       播放状态机 / 音频流 / 响应体
   records/      播放历史读写
 scripts/        api-smoke.mjs 接口体检 · turns.mts 看观测 · cases.mts 失败案例集
-                · tasks-tick.mts 打一次 ⑩ 的 tick · auto-tag.mts AI 打标
-cases/          failure-cases.json —— 失败案例集（**测 agent 的，不是 agent 的一部分**）
+                · cases-diff.mts 对比两份报告 · tasks-tick.mts 打一次 ⑩ 的 tick
+                · auto-tag.mts AI 打标
+cases/          failure-cases.json 失败案例集 + report.ts 报告形状与「该不该删」的判定
+                （**测 agent 的，不是 agent 的一部分**）
 data/           music/（曲库源码资产）+ app.db（运行时派生，见 .gitignore）
 ```
 
@@ -191,27 +193,39 @@ data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
 （**会过时的那一层** —— 为绕开模型当时的某种缺陷而写的「某类说法 → 该调哪个工具」路由表）。
 
 分开的理由不是让 prompt 变短，是让**「这条补丁还需不需要」变成一个能跑出数字的问题**：
-`PROMPT_DISABLE=work_style` 起一个实例，那一整段就关掉了。四件套：
+`PROMPT_DISABLE=work_style` 起一个实例，那一整段就关掉了。五件套：
 
 | 件 | 在哪 | 它解决什么 |
 |:---|:---|:---|
 | 补丁段落化 + 开关 | `agent/prompt.ts` 的 `PATCHES` / `PROMPT_DISABLE` | 把一条补丁变成一个**可以关掉的变量**（关掉是整段消失，不留「本节已关闭」——那会多出一个不属于补丁的变量） |
 | 版本指纹 | 同上 `promptVersion()` → 响应头 `x-prompt-version` + `agent_turns.prompt_version` | 两版的数字**不会混在一起**；`npm run turns` 出现多个版本时自动给分组小计 |
 | 失败案例集 | `cases/failure-cases.json` | 判据只落在**可观察的事实**上（调了哪个工具、回答里有没有某个字符串、走了几步） |
-| 重跑入口 | `scripts/cases.mts`（`npm run cases`） | 打自家 `/api/agent`，从 UI 消息流里读工具链与文本，出报告 |
+| 重跑入口 | `scripts/cases.mts`（`npm run cases`） | 打自家 `/api/agent`，从 UI 消息流里读工具链与文本，出报告（`CASES_REPORT=<path>` 落成 JSON） |
+| 对比两份报告 | `cases/report.ts` + `scripts/cases-diff.mts`（`npm run cases:diff`） | 把"两张截图对着看"变成一条打印出来的判定：**保留 / 可以删 / 测不出** |
 
 怎么用 —— **先起临时实例**（它会往 `messages` / `agent_turns` 写真实行，所以 `BASE` 是必填的，
 没有默认值）：
 
 ```bash
 APP_DB_PATH="C:/tmp/song-lite-cases.db" npm start -- -p 3200
-BASE=http://127.0.0.1:3200 CASES_REPEAT=3 npm run cases     # 带补丁
+BASE=http://127.0.0.1:3200 CASES_REPEAT=3 CASES_REPORT=full.json CASES_LABEL=full \
+  npm run cases                                  # 带补丁
 
 PROMPT_DISABLE=work_style APP_DB_PATH="C:/tmp/song-lite-cases-b.db" npm start -- -p 3201
-BASE=http://127.0.0.1:3201 CASES_REPEAT=3 npm run cases     # 不带补丁
+BASE=http://127.0.0.1:3201 CASES_REPEAT=3 CASES_REPORT=no-ws.json CASES_LABEL=no-work_style \
+  npm run cases                                  # 不带补丁
+
+npm run cases:diff -- full.json no-ws.json       # 两份放一起才给结论
 ```
 
 **不带也全过 → 那条补丁可以删了**；不带时有失败 → 它还在起作用，保留（失败的那几条就是它的边界）。
+
+`cases:diff` 把这一步从"两张截图对着看"变成一条打印出来的判定，并且**四种情形下拒绝下结论**
+（每一种都会让人误删）：两次是同一版 · "带补丁"那版还关着别的补丁 · 关掉之后的失败全是环境类 ·
+带补丁那版自己也红了。退出码 0 = 每条补丁都有明确结论，1 = 有补丁**测不出**。
+
+`CASES_LABEL` 只是给人认的标签；**对比的方向不看它**，看响应头 `x-prompt-disabled` ——
+手写的标签可能写反，响应头不会。
 
 三条不许省：
 - **`CASES_REPEAT`**：模型是随机的，一次跑一遍不足以下结论；跑 3 遍、报告里显示 `k/N`，
@@ -254,10 +268,13 @@ npx tsc --noEmit    # 全仓类型检查
 npm test            # 单测（node:test，纯函数模块）
 npm run build       # 生产构建
 BASE=http://127.0.0.1:3100 npm run smoke:api   # 接口冒烟（需先起服务）
-npm run turns       # 看最近几轮对话的观测（⑨）：步数 / 工具链 / 耗时 / 首字延迟 / token / 钱 / 触顶
+npm run turns       # 看最近几轮对话的观测（⑨）：步数 / 工具链 / 耗时 / 首字延迟 / token / 钱
+                    #   / 触顶 / **预算**（两种「被上限停住」分开标、分开数——症状一样、修法相反）
                     #   并给出**归因**（这一轮为什么是这样、下一步动哪儿）+ 归因分布
 BASE=http://127.0.0.1:3100 npm run tasks:tick   # 打一次 ⑩ 的 tick（跑一件到期任务；需先起服务）
 npm run cases       # 失败案例集（需先起**临时实例**并把 BASE 指过去，见上）
+                    #   CASES_REPORT=<path> 把这次跑落成 JSON；CASES_LABEL=<text> 给这一版起个名
+npm run cases:diff -- <A.json> <B.json>          # 两份报告放一起 → 「保留 / 可以删 / 测不出」
 ```
 
 前端回归**一律走生产模式**（`npm run build && npm start -- -p 3100`），

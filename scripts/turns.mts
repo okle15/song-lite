@@ -24,7 +24,11 @@
  *                 跑这个脚本的进程配没配**不影响**已存的数字 —— 判"为什么是「—」"
  *                 要看**行**，不能看本地环境变量。
  *   tokens        贵不贵（钱 = token 数 × 单价，两列一起看才谈得上"贵"）
- *   触顶          被 MAX_STEPS 掐了（**模型"话没说完"最可能的原因**）
+ *   触顶 / 预算   这一轮被**哪一种上限**停住的。两种都是「最后一步还在要工具、话没说完」，
+ *                 所以数据上长得几乎一样，但下一步动作**完全不同** —— 一个该调大 `MAX_STEPS`、
+ *                 一个该调大 `AGENT_MAX_COST_MICRO`。合成一个记号就等于把诊断引向错的方向，
+ *                 所以这里是两个标记、合计里也分开数（`budget_hit` 是 2026-09-24 加的列）。
+ *                 `预算` 撞不上时它显示不出来 —— 没配闸门就是永不触发，那不是"没问题"。
  *   中断 / 错误   用户点了停止 / 网关报错（后者以前只能翻服务端日志）
  *   **归因**      把上面那些候选答案**排成一句能据以行动的话**（`server/agent/diagnose.ts`）。
  *                 逐轮打印，表尾再给一次**分布**。它回答的是「这一轮为什么是这样、
@@ -110,6 +114,9 @@ console.log(
 for (const [i, row] of rows.entries()) {
 	const flags = [
 		row.truncated ? '触顶' : '',
+		// 「预算」单独一个标记，不并进「触顶」：两者症状一样、修法相反
+		// （见文件头那一行，以及 `turn-log.ts` 的 `TurnRecord.budgetHit`）。
+		row.budgetHit ? '预算' : '',
 		row.aborted ? '中断' : '',
 		row.error ? '错误' : '',
 	].filter(Boolean);
@@ -159,6 +166,9 @@ for (const [i, row] of rows.entries()) {
 }
 
 const truncated = rows.filter((r) => r.truncated).length;
+// 与「触顶」分开数：合计里只有一个数的话，看到「触顶 3」的人会去调 MAX_STEPS，
+// 而其中可能有两条其实是钱用完了 —— 调步数上限对它们毫无作用。
+const budget = rows.filter((r) => r.budgetHit).length;
 const aborted = rows.filter((r) => r.aborted).length;
 const errored = rows.filter((r) => r.error).length;
 const failed = rows.filter((r) => r.tools.some((t) => t.ok === false)).length;
@@ -174,8 +184,15 @@ const firsts = rows
 const medianFirst = firsts.length ? firsts[Math.floor(firsts.length / 2)] : null;
 
 console.log(
-	`\n合计 ${rows.length} 轮：触顶 ${truncated} · 中断 ${aborted} · 有错 ${errored} · 内有失败工具 ${failed}`,
+	`\n合计 ${rows.length} 轮：触顶 ${truncated} · 预算 ${budget} · 中断 ${aborted} · 有错 ${errored} · 内有失败工具 ${failed}`,
 );
+if (budget > 0) {
+	// 撞了就明说下一步做什么 —— 与归因那段同一个判据（那两条诊断是按 `budgetHit` 给的）。
+	console.log(
+		`  ↳ 有 ${budget} 轮是被**成本闸门**停住的：调大 AGENT_MAX_COST_MICRO，` +
+			'或让提示词把那几步收掉（改 MAX_STEPS 对它们没用）。',
+	);
+}
 console.log(
 	`最慢的一轮：${slow.ms}ms（${shortTime(slow.createdAt)}「${slow.userText.slice(0, 20)}」）` +
 		(medianFirst === null ? '' : `　·　首字中位 ${medianFirst}ms（${firsts.length}/${rows.length} 轮有值）`),
@@ -237,7 +254,13 @@ if (byVersion.size > 1) {
 		const avgSteps = (list.reduce((a, r) => a + r.steps, 0) / list.length).toFixed(1);
 		const avgMs = Math.round(list.reduce((a, r) => a + r.ms, 0) / list.length);
 		const bad = list.filter(
-			(r) => r.truncated || r.aborted || r.error || r.tools.some((t) => t.ok === false),
+			(r) =>
+				r.truncated ||
+				// 撞预算也是「异常」：它不是模型答错，但这一轮的结论不能用
+				r.budgetHit ||
+				r.aborted ||
+				r.error ||
+				r.tools.some((t) => t.ok === false),
 		).length;
 		// 每轮平均花了多少 —— 补丁组的差通常也体现在"多走一步"上，而步数与钱是同一件事的两面
 		const pricedList = list.filter((r) => r.costMicro !== null);

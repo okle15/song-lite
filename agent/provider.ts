@@ -71,3 +71,21 @@ export function getModel(config: AgentConfig): LanguageModel {
 		apiKey: config.key,
 	}).chatModel(config.model);
 }
+
+/**
+ * 本轮的成本上限（**微美元**）。变量 `AGENT_MAX_COST_MICRO`，**默认 0 = 不限**。
+ *
+ * 为什么默认不限，而不是给一个"合理的小数目"：一个默认打开的闸门会在用户不知情的
+ * 情况下改变行为（该说的话说到一半停了），而它的症状与"模型话说一半"**无法区分** ——
+ * 这种"悄悄替用户做决定"正是本项目反复防的东西。**要拦，得用户自己说要拦。**
+ *
+ * 读不到、非数字、负数、0 一律当成「不限」：env 写错时的安全方向是**放行**，
+ * 而不是把服务变成"什么都干不了"（同 `overBudget` 里"没有价目就放行"那条）。
+ *
+ * 放在这个文件（provider）是因为它是**读环境变量的唯一处**——`agent/` 与 `app/`
+ * 两侧都从这里取，不会各写一份解析。
+ */
+export function readCostLimitMicro(): number {
+	const raw = Number(process.env.AGENT_MAX_COST_MICRO);
+	return Number.isFinite(raw) && raw > 0 ? Math.trunc(raw) : 0;
+}

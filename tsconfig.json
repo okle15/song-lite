@@ -30,6 +30,7 @@
     "agent/**/*.ts",
     "app/**/*.ts",
     "app/**/*.tsx",
+    "cases/**/*.ts",
     "components/**/*.ts",
     "components/**/*.tsx",
     "contract/**/*.ts",

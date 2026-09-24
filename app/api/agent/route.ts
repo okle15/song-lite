@@ -18,12 +18,12 @@
  */
 import { createUIMessageStreamResponse, isTextUIPart, toUIMessageStream, type UIMessage } from 'ai';
 import { PATCH_IDS, disabledPatches, promptVersion, unknownPatchIds } from '@/agent/prompt';
-import { readAgentConfig } from '@/agent/provider';
+import { readAgentConfig, readCostLimitMicro } from '@/agent/provider';
 import { MAX_STEPS, runAgent } from '@/agent/run';
 import type { PlayerSnapshot } from '@/contract/player';
 import { appendMessages } from '@/server/agent/message-log';
 import { listPreferences } from '@/server/agent/preference-log';
-import { costMicroFor } from '@/server/agent/pricing';
+import { costMicroFor, priceOf, readPriceTable } from '@/server/agent/pricing';
 import {
 	recordSpans,
 	recordTurn,
@@ -115,6 +115,11 @@ export async function POST(request: Request) {
 	 * 与"0ms 就开口了"是两件事，见 `turn-log.ts`。
 	 */
 	let firstTextMs: number | null = null;
+	/**
+	 * 本轮**因成本上限被停住**了吗。与 `firstTextMs` 同一种手法：钩子记一个布尔，
+	 * 事后不反推（预算触顶与步数触顶在数据上长得一样，反推就是猜）。
+	 */
+	let budgetHit = false;
 
 	const { result, tools } = await runAgent(config, {
 		uiMessages,
@@ -136,6 +141,20 @@ export async function POST(request: Request) {
 		// 改成了每次都回调"这种会把数字记成最后一字的改动。
 		onFirstText: () => {
 			if (firstTextMs === null) firstTextMs = Date.now() - startedAt;
+		},
+		// ── 成本闸门 ──
+		// 上限来自环境（`AGENT_MAX_COST_MICRO`，默认不限），**价目由这里读好传进去**：
+		// agent 不 import `server/`（依赖方向），所以它只「收到事实」——
+		// 与上面的 `snapshot` / `preferences` 是同一个模式。
+		budget: {
+			limitMicro: readCostLimitMicro(),
+			price: priceOf(readPriceTable(), config.model),
+		},
+		// 撞上限时记一笔。**回调是"记"，事后从 steps 反推是"猜"** ——
+		// 那两种触顶在数据里长得一样，而它们的下一步动作完全不同
+		// （见 `turn-log.ts` 的 `TurnRecord.budgetHit`）。
+		onBudgetHit: () => {
+			budgetHit = true;
 		},
 	});
 
@@ -194,6 +213,8 @@ export async function POST(request: Request) {
 					maxSteps: MAX_STEPS,
 					aborted: isAborted,
 					error: turnError,
+					// 由 `onBudgetHit` 记下来的，不是从 steps 推的。
+					budgetHit,
 				}),
 				finishReason: finishReason ?? null,
 				ms: Date.now() - startedAt,

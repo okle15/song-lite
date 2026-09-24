@@ -35,6 +35,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { PLAYBACK_MODE_LABEL } from '../contract/player';
 import { normalizePreferenceKey, type Preference } from '../contract/preference';
+import { repeatLabel } from '../contract/task';
 import type { ToolFailureKind, ToolOutcome } from '../contract/tool';
 import { normalizeTags } from '../contract/track-tags';
 
@@ -228,29 +229,12 @@ export function formatPlayTime(iso: string, now: Date = new Date()): string {
 	return rel ? `${stamp}，${rel}` : stamp;
 }
 
-/** 星期几。`getDay()` 是 0=周日，与 `Intl` 的中文输出不一定一致，所以自己钉一份。 */
-const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-
-/** 「每周一三五」中间那串字（`[1,3,5]` → `一三五`）。**索引与 `WEEKDAYS` 同序**。 */
-const DAY_CHARS = ['日', '一', '二', '三', '四', '五', '六'];
-
 /**
- * 把 `repeat` / `repeatDays` 译成一句人话的**标签**：`每天` / `每周一三五` / `''`（只做一次）。
- *
- * 它存在的理由是**把服务端理解成的东西念回去**：模型自己推的 `dueAt` 与它嘴上说的
- * 「每周一」是不是同一件事，只有在返回值里看见才算核对过一遍。少念一档
- * （比如 daily 与 weekly 都不说）时，模型会以为"排上了"就是"按我要的频率排上了"，
- * 而那两种频率差了七倍。
- *
- * 只给标签、不给整句，是因为它有两个读法：排期成功后念回「，每周一重复」，
- * 列清单时贴在时间后面「（每周一）」—— 一句话写死在一处，另一处就只能再写一遍。
+ * `repeatLabel`（`每天` / `每周一三五`）移到 `contract/task.ts` 了 —— 它如今有两个
+ * 读法：模型在返回值里念回去的、卡片上显示给用户看的，**必须同源**。
+ * 这里只留 `WEEKDAYS`：它是 `formatAbsolute` 的（绝对时间锚，与任务无关）。
  */
-function repeatLabel(repeat: TaskRow['repeat'], days: number[] | undefined): string {
-	if (repeat === 'daily') return '每天';
-	if (repeat !== 'weekly') return '';
-	const list = days ?? [];
-	return list.length > 0 ? `每周${list.map((d) => DAY_CHARS[d] ?? '?').join('')}` : '每周';
-}
+const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
 /**
  * 把 ISO 时间译成「09-24 07:00，周四」。**只给绝对时间，不给相对说法**（与

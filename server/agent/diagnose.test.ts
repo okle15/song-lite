@@ -28,6 +28,7 @@ function turn(over: Partial<TurnRecord> = {}): TurnRecord {
 			{ name: 'build_queue', ms: 300, ok: true },
 		],
 		truncated: false,
+		budgetHit: false,
 		aborted: false,
 		finishReason: 'stop',
 		ms: 9_000,
@@ -206,4 +207,44 @@ test('summarizeDiagnoses：次数降序、同次数按 code 升序（两次跑�
 
 test('summarizeDiagnoses：空输入给空数组（不是 undefined，调用方不该判空）', () => {
 	assert.deepEqual(summarizeDiagnoses([]), []);
+});
+
+/* ── 成本闸门（budget）───────────────────────────────────────────── */
+
+test('撞成本上限：报 budget 而不是 truncated（症状一样、动作不同）', () => {
+	const out = diagnoseTurn(turn({ budgetHit: true, steps: 5, firstTokenMs: null }));
+	const codes = out.map((f) => f.code);
+	assert.ok(codes.includes('budget'), '得报出来，否则用户不知道为什么话说一半');
+	assert.ok(!codes.includes('truncated'), '两个上限不能混成一个标记 —— 改的方向不一样');
+	assert.equal(
+		out.find((f) => f.code === 'budget')?.blame,
+		'env',
+		'动作指向配置（调预算），不是改提示词 —— 所以归在 env，报告里带「⚠ 环境」前缀',
+	);
+});
+
+test('撞成本上限时不再重复报 silent / many_steps（一个现象只归因一次）', () => {
+	// 这一轮的形状与"撞步数上限"那一轮**完全一样**：步数多、一个字都没回。
+	// 触顶已经把"为什么没说话""为什么停在这"解释掉了，再报一遍就是重复归因 ——
+	// 两条都在描述同一个现象，而修法只有一条。
+	const codes = diagnoseTurn(turn({ budgetHit: true, steps: 5, firstTokenMs: null })).map((f) => f.code);
+	assert.ok(!codes.includes('silent'));
+	assert.ok(!codes.includes('many_steps'));
+});
+
+test('没撞预算时一律不报 budget（老行与没配闸门都是 false）', () => {
+	assert.ok(!diagnoseTurn(turn()).some((f) => f.code === 'budget'));
+	assert.ok(
+		!diagnoseTurn(turn({ truncated: true, steps: 5, firstTokenMs: null })).some((f) => f.code === 'budget'),
+		'撞步数上限 ≠ 撞预算',
+	);
+});
+
+test('summarizeDiagnoses：budget 有中文短语（表尾分布要能读）', () => {
+	const tally = summarizeDiagnoses([
+		diagnoseTurn(turn({ budgetHit: true, steps: 5, firstTokenMs: null })),
+	]);
+	const b = tally.find((t) => t.code === 'budget');
+	assert.equal(b?.count, 1);
+	assert.equal(b?.label, '撞成本上限');
 });

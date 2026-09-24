@@ -4,8 +4,12 @@
  * 「卡片可以隐藏」就必须有找回来的地方，否则一旦隐藏就永久失去，
  * 只能去清 localStorage——这个入口是隐藏功能的必要配套。
  *
- * 这里列出全部 4 张卡片并支持直接开关显隐（隐藏 → 恢复），
+ * 这里列出**全部**卡片（`ALL_CARD_IDS`）并支持直接开关显隐（隐藏 → 恢复），
  * 另外提供「重置为默认布局」兜底。
+ *
+ * ⚠️ 这张表也是**加新卡时的恢复入口**：老用户的 localStorage 里没有新卡，
+ * `sanitizeLayout` 会把它补进 `hidden`，于是这里显示为「已隐藏 · 恢复」。
+ * 那条路径曾经是断的（`restoreCard` 的守卫会静默吞掉它），见 `panel-layout.ts`。
  */
 'use client';
 import { useEffect, useRef, useState } from 'react';
@@ -19,6 +23,7 @@ const CARD_HINTS: Record<CardId, string> = {
 	nowplaying: '大封面、进度与播放控制',
 	queue: '当前播放队列，点击切歌',
 	lyrics: '当前曲目歌词，随播放滚动',
+	tasks: '排过的定时任务，可撤回',
 };
 
 export function LayoutMenu() {

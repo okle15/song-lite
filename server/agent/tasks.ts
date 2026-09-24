@@ -61,35 +61,15 @@
  * 提醒我放歌」，任务没排上他会一直干等 —— 这不是"少一行统计"，是**对用户的承诺
  * 没兑现**。所以写失败必须抛到路由 → 工具返回失败 → 模型如实告诉他。
  */
+import type { Task, TaskRepeat, TaskStatus } from '../../contract/task';
 import { getDb } from '../db';
 
-export type TaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled';
-export type TaskRepeat = 'none' | 'daily' | 'weekly';
-
-/** 一件任务。字段名与建表一一对应（`server/db.ts` 里的 `tasks`）。 */
-export type Task = {
-	id: string;
-	/** 模型自己写下的那句话：用户想让它做到什么。 */
-	goal: string;
-	/** 该做的时间（ISO）。 */
-	dueAt: string;
-	repeat: TaskRepeat;
-	/**
-	 * `weekly` 的"哪几天"（0=周日…6=周六，去重升序）。
-	 * `none` / `daily` 恒为空数组；`weekly` **恒非空** —— 调用方没说哪天时，
-	 * 建表那一刻就按 `dueAt` 的星期补上一个（"每周一"不必再传一遍 `1`）。
-	 * 于是读这一行的人不必猜"空代表哪天"。
-	 */
-	repeatDays: number[];
-	status: TaskStatus;
-	/** 认领过几次。**它同时是"卡住过几次"的痕迹**（每次租约回收都会 +1）。 */
-	attempts: number;
-	lastError: string | null;
-	/** 上次执行的一句话结论（给用户看的那句）。 */
-	result: string | null;
-	createdAt: string;
-	lastRunAt: string | null;
-};
+/**
+ * 形态与「重复方式怎么念」都在 `contract/task.ts` —— 它有**三个消费方**
+ * （服务端 / 模型 / 浏览器卡片），后两个不许 import `server/`。
+ * 这里 re-export 只为不打断既有调用方（单测、路由都从本模块取类型）。
+ */
+export type { Task, TaskRepeat, TaskStatus };
 
 /** 目标那句话的长度上限。任务不是文档，超过就该拆成两件。 */
 const GOAL_MAX = 300;

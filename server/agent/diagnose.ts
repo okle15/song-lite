@@ -34,6 +34,7 @@ export type FindingCode =
 	| 'gateway_error'
 	| 'aborted'
 	| 'truncated'
+	| 'budget'
 	| 'tool_env'
 	| 'tool_behaviour'
 	| 'silent'
@@ -110,6 +111,11 @@ export function diagnoseTurn(row: TurnRecord, spans: SpanRecord[] = []): Finding
 		});
 	}
 
+	// 被某种上限截断（步数 / 预算）。这两件事在「它为什么没把话说完」上是**等价**的，
+	// 所以下面的 `silent` 与 `many_steps` 都不该再报一遍 —— 归因的纪律②：
+	// **不许重复归因同一个现象**（触顶已经解释了"为什么没说话"）。
+	const bounded = row.truncated || row.budgetHit;
+
 	// ── 撞上步数上限 ──
 	if (row.truncated) {
 		out.push({
@@ -118,6 +124,20 @@ export function diagnoseTurn(row: TurnRecord, spans: SpanRecord[] = []): Finding
 			text:
 				`撞上步数上限（走了 ${row.steps} 步，最后一次仍在要工具）：多半是那句要求没写清，` +
 				'或在这份曲库里满足不了 —— 它是"一直在试"，不是"试不动"',
+		});
+	}
+
+	// ── 撞上成本上限 ──
+	// 与 `truncated` **并列但分开报**：症状一样，动作完全不同 —— 一个该调大
+	// `MAX_STEPS`，一个该调大预算。合成一条，给出的方向必然有一半是错的。
+	// 记在 `env` 上（报告里带「⚠ 环境」前缀）是有意的：**先去查配置，别先怀疑提示词**。
+	if (row.budgetHit) {
+		out.push({
+			code: 'budget',
+			blame: 'env',
+			text:
+				`走到第 ${row.steps} 步时花到了成本上限，本轮被停住 —— 不是它不会说，是预算用完了；` +
+				'该调大 AGENT_MAX_COST_MICRO（若确实配得太小），或让提示词少绕几步',
 		});
 	}
 
@@ -150,7 +170,7 @@ export function diagnoseTurn(row: TurnRecord, spans: SpanRecord[] = []): Finding
 		row.steps > 0 &&
 		!row.aborted &&
 		!row.error &&
-		!row.truncated
+		!bounded
 	) {
 		out.push({
 			code: 'silent',
@@ -200,7 +220,7 @@ export function diagnoseTurn(row: TurnRecord, spans: SpanRecord[] = []): Finding
 	}
 
 	// ── 步数偏多（但没触顶）──
-	if (!row.truncated && row.steps >= MANY_STEPS) {
+	if (!bounded && row.steps >= MANY_STEPS) {
 		out.push({
 			code: 'many_steps',
 			blame: 'info',
@@ -216,6 +236,7 @@ export const FINDING_LABELS: Record<FindingCode, string> = {
 	gateway_error: '网关/服务端报错',
 	aborted: '用户中断',
 	truncated: '撞步数上限',
+	budget: '撞成本上限',
 	tool_env: '工具失败（环境类）',
 	tool_behaviour: '工具失败（它自己能修）',
 	silent: '调了工具却没回话',

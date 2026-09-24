@@ -32,7 +32,11 @@
 'use client';
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useChat } from '@ai-sdk/react';
-import { DefaultChatTransport, type UIMessage } from 'ai';
+import {
+	DefaultChatTransport,
+	lastAssistantMessageIsCompleteWithApprovalResponses,
+	type UIMessage,
+} from 'ai';
 import { APlayerPlayer } from '@/components/APlayerPlayer';
 import { ChatCard } from '@/components/ChatCard';
 import { GlobalHotkeys } from '@/components/GlobalHotkeys';
@@ -48,6 +52,7 @@ import { QueueList } from '@/components/QueueList';
 import { ShortcutsPanel } from '@/components/ShortcutsPanel';
 import { ChatIcon, CloseIcon } from '@/components/icons';
 import { SPLIT_HANDLE_PX, SplitHandle } from '@/components/SplitHandle';
+import { TasksCard } from '@/components/TasksCard';
 import { ThemePanel } from '@/components/ThemePanel';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { useEscapeToClose } from '@/components/use-escape-to-close';
@@ -84,7 +89,15 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 	const transport = useMemo(() => new DefaultChatTransport({ api: '/api/agent' }), []);
 	// `messages` 是**初始值**，之后由 useChat 自己维护。服务端渲染与本组件 hydrate
 	// 拿到的是同一份 props，所以 React 找不到需要重画的东西——这就是「无闪」的全部机制。
-	const chat = useChat({ transport, messages: initialMessages });
+	const chat = useChat({
+		transport,
+		messages: initialMessages,
+		// 确认闸门的**前端一半**（服务端那一半是 `agent/run.ts` 的 `toolApproval`）。
+		// 用户点完「执行 / 算了」之后自动把答复发回服务端续跑这一轮 ——
+		// 少了它，按钮点下去界面也不会动：`addToolApprovalResponse` 只改本地的
+		// 消息状态，**不会自己触发下一次请求**，于是那一轮永远停在"等一个回答"。
+		sendAutomaticallyWhen: lastAssistantMessageIsCompleteWithApprovalResponses,
+	});
 	const { sendMessage } = chat;
 
 	// 快照用 ref 镜像，`sendToAgent` 因此不必随每次播放进度变化而重建。
@@ -177,6 +190,12 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 						error={chat.error}
 						onSend={sendToAgent}
 						onStop={chat.stop}
+						// 不可逆动作的确认按钮（见 `agent/run.ts` 的 `toolApproval`）。
+						// 内联箭头而不是 useCallback：`chat` 每次渲染都是新对象，
+						// 依赖它等于没有缓存 —— 徒增一层读代码时的疑惑。
+						onApproval={(id, approved) => {
+							void chat.addToolApprovalResponse({ id, approved });
+						}}
 					/>
 				);
 			case 'lyrics':
@@ -185,6 +204,15 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 				return <NowPlaying />;
 			case 'queue':
 				return <QueueList />;
+			case 'tasks':
+				// `refreshKey` 用消息条数：助手刚排完任务（或撤回了任务）时，
+				// 这一轮对话必然多出几条消息 —— 于是卡片会自动重取清单。
+				// 不轮询：**人在场的时候**，能改到这张清单的只有两条路（跟助手说 / 在卡上点撤回），
+				// 而两条都在这条链上。
+				// ⚠️ 但 ⑩ 的本职恰恰是「用户不在的时候做事」：cron 打的那一次 tick **不在这条链上**，
+				// 所以卡片显示的是**你打开它那一刻**的真值，不是实时推送 —— 回到页面时它可能已经旧了
+				// （刷新即准：数据是 GET 现取的，没有任何缓存）。别把它当通知用。
+				return <TasksCard refreshKey={chat.messages.length} />;
 		}
 	};
 

@@ -89,6 +89,16 @@ export type TurnRecord = {
 	tools: ToolTrace[];
 	/** 撞到 `MAX_STEPS` 被掐掉：模型还想调工具，但循环到上限了。 */
 	truncated: boolean;
+	/**
+	 * 这一轮**因成本上限被停住**（`agent/run.ts` 的 `overBudget`）。
+	 *
+	 * 与 `truncated` 分开是刻意的：**症状一样、动作不同** —— 一个该调大
+	 * `MAX_STEPS`，一个该调大预算。合成一个标记，诊断就必然朝错的方向改。
+	 *
+	 * 它是路由的 `onBudgetHit` 回调**记**下来的，不是事后从 `steps` 反推的：
+	 * 反推是猜（那两种触顶在数据上长得一样），回调是记。
+	 */
+	budgetHit: boolean;
 	aborted: boolean;
 	/**
 	 * SDK 自己的收尾原因（`stop` / `tool-calls` / `length` / `error`…）。
@@ -170,11 +180,22 @@ function pickOutcome(output: unknown): { ms: number | null; ok: boolean | null; 
  *   - 步数已经贴到上限（`steps >= maxSteps`）；
  *   - 最后一步的 `finishReason` 仍是 `'tool-calls'`（= 它还想继续调，是被我们掐的）。
  * 只看后者会把中间步当成截断，只看前者会把"刚好在上限那一步收尾"误判成截断。
+ *
+ * `budgetHit` 则**不由这里推导**，只透传调用方（路由的回调）给的那个布尔 ——
+ * 原因见 `TurnRecord.budgetHit`。
  */
 export function summarizeSteps(
 	steps: StepLike[],
-	opts: { maxSteps: number; aborted?: boolean; error?: string | null } = { maxSteps: 0 },
-): Pick<TurnRecord, 'steps' | 'toolCalls' | 'tools' | 'truncated' | 'aborted' | 'error'> {
+	opts: {
+		maxSteps: number;
+		aborted?: boolean;
+		error?: string | null;
+		budgetHit?: boolean;
+	} = { maxSteps: 0 },
+): Pick<
+	TurnRecord,
+	'steps' | 'toolCalls' | 'tools' | 'truncated' | 'budgetHit' | 'aborted' | 'error'
+> {
 	const tools: TurnRecord['tools'] = [];
 	for (const step of steps) {
 		const byId = new Map(step.toolResults.map((r) => [r.toolCallId, r]));
@@ -193,6 +214,7 @@ export function summarizeSteps(
 		toolCalls: tools.length,
 		tools,
 		truncated,
+		budgetHit: opts.budgetHit === true,
 		aborted: opts.aborted === true,
 		error: opts.error ?? null,
 	};
@@ -328,14 +350,15 @@ export function recordTurn(
 		getDb()
 			.prepare(
 				`INSERT INTO agent_turns
-					(id, created_at, user_text, steps, tool_calls, tools, truncated, aborted,
+					(id, created_at, user_text, steps, tool_calls, tools, truncated, budget_hit, aborted,
 					 finish_reason, ms, first_token_ms, input_tokens, output_tokens, error,
 					 model, cost_micro, prompt_version, prompt_disabled)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				 ON CONFLICT(id) DO UPDATE SET
 					user_text = excluded.user_text, steps = excluded.steps,
 					tool_calls = excluded.tool_calls, tools = excluded.tools,
-					truncated = excluded.truncated, aborted = excluded.aborted,
+					truncated = excluded.truncated, budget_hit = excluded.budget_hit,
+					aborted = excluded.aborted,
 					finish_reason = excluded.finish_reason, ms = excluded.ms,
 					first_token_ms = excluded.first_token_ms,
 					input_tokens = excluded.input_tokens, output_tokens = excluded.output_tokens,
@@ -352,6 +375,7 @@ export function recordTurn(
 				record.toolCalls,
 				JSON.stringify(record.tools),
 				record.truncated ? 1 : 0,
+				record.budgetHit ? 1 : 0,
 				record.aborted ? 1 : 0,
 				record.finishReason,
 				record.ms,
@@ -378,6 +402,8 @@ type RawTurnRow = {
 	tool_calls: number;
 	tools: string;
 	truncated: number;
+	/** 同样是老库升级补的列 → 可空。NULL 读成 false（那时闸门还不存在，确实没撞过）。 */
+	budget_hit: number | null;
 	aborted: number;
 	finish_reason: string | null;
 	ms: number;
@@ -421,6 +447,7 @@ export function recentTurns(limit = READ_LIMIT): TurnRecord[] {
 				toolCalls: row.tool_calls,
 				tools,
 				truncated: row.truncated === 1,
+				budgetHit: row.budget_hit === 1,
 				aborted: row.aborted === 1,
 				finishReason: row.finish_reason,
 				ms: row.ms,

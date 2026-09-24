@@ -21,12 +21,14 @@
 import {
 	convertToModelMessages,
 	isStepCount,
+	isToolUIPart,
 	pruneMessages,
 	streamText,
 	type UIMessage,
 } from 'ai';
 import type { Preference } from '../contract/preference';
 import type { PlayerSnapshot } from '../contract/player';
+import { costMicro, type Price } from '../contract/pricing';
 import { buildSystemPrompt } from './prompt';
 import { type AgentConfig, getModel } from './provider';
 import { createTools } from './tools';
@@ -79,6 +81,21 @@ export type RunAgentOptions = {
 	 * 契约是**只回调一次**（实现里带本地标记），调用方不必自己去重。
 	 */
 	onFirstText?: () => void;
+	/**
+	 * 本轮的成本上限与价目（见 `RunBudget` / `overBudget`）。
+	 * 不传或 `limitMicro <= 0` = 不限，行为与没有这个闸门时完全一样。
+	 */
+	budget?: RunBudget | null;
+	/**
+	 * 本轮**因预算被截断**时回调一次（⑨ 观测用）。
+	 *
+	 * 与 `onFirstText` 同性质：为**观察**挂的钩子，循环的形状一行没动。
+	 *
+	 * 为什么必须有它：预算触顶的症状与"步数触顶"长得几乎一样（最后一步都是
+	 * 想调工具、都没把话说完整），而**下一步动作完全不同** —— 一个该调大预算，
+	 * 一个该调大 `MAX_STEPS`。事后从 `steps` 反推是"猜"，这里回调是"记"。
+	 */
+	onBudgetHit?: () => void;
 };
 
 /**
@@ -101,6 +118,97 @@ export function firstTextChunk(onFirstText?: () => void) {
 		fired = true;
 		onFirstText();
 	};
+}
+
+/**
+ * 判定预算时看得见的**最小**一步。自己声明而不引 `turn-log.ts` 的 `StepLike`：
+ * `agent/` 不许 import `server/`（依赖方向见 AGENTS.md），而这里真的只需要"用量"。
+ */
+type BudgetStep = {
+	usage?: { inputTokens?: number; outputTokens?: number } | null;
+};
+
+/**
+ * 本轮的成本上限（微美元）与算它要用的价目。
+ *
+ * 为什么价目**跟着 budget 一起传**，而不是让 `run.ts` 自己去读 `process.env`：
+ * 与 `snapshot` / `preferences` 同一个模式 —— agent 不 import `server/`
+ * （依赖方向），所以它只「收到事实」，不负责取事实。
+ */
+export type RunBudget = {
+	/** 硬上限（微美元）。`<= 0` 表示不限。 */
+	limitMicro: number;
+	/** 该模型的单价；`null` = 没配价目（那就不拦，见 `overBudget`）。 */
+	price: Price | null;
+};
+
+/**
+ * 造一个「这一轮花超了吗」的判定，交给 `stopWhen`。形状与 SDK 的 `isStepCount`
+ * **完全相同**，于是它与步数上限**并列**成两个停止条件，而不是在业务层另糊一层循环。
+ *
+ * ⚠️ 三条判据，每条都对应一种「不报错但做错」的写法：
+ *
+ *  1. **没有价目时一律放行**（恒返回 false）。算不出钱就把用户拦下来，是拿
+ *     「不知道」当理由拒绝服务。钱算不出来该在观测里显示成「—」（`costMicro`
+ *     返回 `null`），而不是变成「这轮不许用」—— 与 `turn-log.ts` 里
+ *     `ms` 用 null 不用 0 是同一条判据。
+ *  2. **逐步累加，不能只看最后一步。** SDK 的 `step.usage` 是**每一步各自**的用量，
+ *     不是累计值；拿最后一步当总数会把 5 步的一轮算成 1 步的钱，于是预算**永远撞不上**
+ *     —— 一个"配了却从不生效"的上限，比不配更难发现。
+ *  3. 比的是**严格大于**：`limitMicro` 是"允许花到这个数"，正好等于不算超。
+ */
+export function overBudget(budget: RunBudget | null | undefined) {
+	const price = budget?.price ?? null;
+	const limit = budget?.limitMicro ?? 0;
+	if (!price || !(limit > 0)) return () => false;
+	return ({ steps }: { steps: readonly BudgetStep[] }) => {
+		let micro = 0;
+		for (const step of steps) {
+			if (!step.usage) continue;
+			micro += costMicro(step.usage, price) ?? 0;
+		}
+		return micro > limit;
+	};
+}
+
+/**
+ * 这一轮是不是「审批答复」的续跑 —— 用户刚在界面上点了「执行」或「算了」。
+ *
+ * 判据是 UI 消息里出现了 `state === 'approval-responded'` 的工具 part：那是
+ * `addToolApprovalResponse` 写下的形状（`AbstractChat` 里那三行 `updatePart`），
+ * 只有"答复完、结果还没拿回来"的那一轮才有它。
+ *
+ * ── 为什么必须专门认出来（2026-09-24 端到端实测踩到）────────────────────
+ * 因为它会让 `pruneMessages` 的 `before-last-message` **剪错一刀**：
+ *   `convertToModelMessages` 把审批答复放进**一条新的 `tool` 角色消息**里，于是
+ *   "最后一条"变成了它，而**带 `tool-call` 的 assistant 消息退到了"最后一条之前"**
+ *   → 它的 `tool-call` 被剪掉，而同一消息里的 `tool-approval-request` 却留着
+ *   （`pruneMessages` 对审批 part 单独记账 `keptApprovalIds`，那一条命中了）。
+ *   服务端的 `collectToolApprovals` 于是找不到配对的 tool-call，直接抛
+ *   `ToolCallNotFoundForApprovalError`。
+ *
+ * 症状有多隐蔽：用户点「执行」，界面只多出一句英文报错
+ * （`Tool call "call_xxx" not found for approval request "aitxt-xxx".`），
+ * **工具永远不会跑、那一轮也不会续**；而 `tsc` 全绿、单测全绿、服务端日志干净
+ * —— 因为报错是以 `error` 帧回来的，不是异常。
+ */
+function isApprovalResumption(uiMessages: UIMessage[]): boolean {
+	return uiMessages.some((m) =>
+		m.parts.some((p) => isToolUIPart(p) && p.state === 'approval-responded'),
+	);
+}
+
+/**
+ * 这一轮该用哪一档工具轨迹裁剪。
+ *
+ * **导出是给单测的，不是给别的调用方用的** —— 这条规则的输入是承重的：选错一档，
+ * 审批续跑就会抛 `ToolCallNotFoundForApprovalError`（见 `isApprovalResumption` 的
+ * 长注），而这个错误在 `tsc`、单测、服务端日志里**一个都不留痕**。所以把"选哪一档"
+ * 从 `runAgent` 的函数体里提出来，让单测能直接断言它 —— 顺带也就能断言
+ * **旧那一档真的会把 tool-call 剪掉**（不然这条回归用例可能"因为错误的原因而绿"）。
+ */
+export function toolCallPruningFor(uiMessages: UIMessage[]): 'none' | 'before-last-message' {
+	return isApprovalResumption(uiMessages) ? 'none' : 'before-last-message';
 }
 
 /**
@@ -138,12 +246,27 @@ export async function runAgent(config: AgentConfig, opts: RunAgentOptions) {
 	//    `before-last-message` = 只保留最后一条消息之后的工具轨迹，也就是「本轮
 	//    自己的、还热着的」。历史轮的全部扔掉。这一条对应 BLUEPRINT 里「用户选的
 	//    是轨迹全扔」，改它就是改产品行为。
+	//
+	//    ⚠️ **唯一例外：审批续跑那一轮必须原样留着**（`toolCallPruningFor` 会说为什么）。
 	const messages = pruneMessages({
 		messages: history,
 		reasoning: 'none',
-		toolCalls: 'before-last-message',
+		toolCalls: toolCallPruningFor(opts.uiMessages),
 		emptyMessages: 'remove',
 	});
+
+	// 预算闸门：与 `MAX_STEPS` **并列**的第二个停止条件（形状相同，见 `overBudget`）。
+	// 命中时回调一次 —— 本地标记保证"只回调一次"，调用方不必自己去重（同 `firstTextChunk`）。
+	const exceedsBudget = overBudget(opts.budget);
+	let budgetHit = false;
+	const budgetStop = (o: { steps: readonly BudgetStep[] }) => {
+		const hit = exceedsBudget(o);
+		if (hit && !budgetHit) {
+			budgetHit = true;
+			opts.onBudgetHit?.();
+		}
+		return hit;
+	};
 
 	const result = streamText({
 		model: getModel(config),
@@ -153,7 +276,25 @@ export async function runAgent(config: AgentConfig, opts: RunAgentOptions) {
 		instructions: buildSystemPrompt(opts.snapshot, opts.preferences),
 		messages,
 		tools,
-		stopWhen: isStepCount(MAX_STEPS),
+		stopWhen: [isStepCount(MAX_STEPS), budgetStop],
+		// ── 确认闸门：不可逆的动作先问一句 ──
+		// 判据是**「删掉的是用户的东西」**，而不是"危险"这种说不清的词。这两个工具
+		// 一旦执行就没有回头的路，而模型有可能误解了用户的意思：一句「我明天不想
+		// 听歌了」被它读成「把那个定时任务撤掉」——**撤掉之后用户根本不知道
+		// 曾经有这么一件事**（清单里不再有它，没有任何痕迹）。
+		//
+		// ⚠️ 为什么这不算"在业务层糊一层"：它是 `streamText` 的**原生选项**，
+		// 与 `stopWhen` 同一层 —— 循环的形状一行没动，审批由 SDK 插在
+		// 「模型要调工具」与「工具真的跑」之间。
+		//
+		// ⚠️ **前端必须一起接住**（`useChat` 的 `sendAutomaticallyWhen` +
+		// `addToolApprovalResponse`，见 `app/home-client.tsx` 与 `components/ChatCard.tsx`）：
+		// 只加服务端这一半，那一轮会停在"等一个永远等不到的回答"上 —— 界面上
+		// 看起来只是"它不动了"，没有任何报错。
+		toolApproval: {
+			cancel_scheduled_task: 'user-approval',
+			forget_preference: 'user-approval',
+		},
 		abortSignal: opts.signal,
 		// ⑨ 的首字延迟。**观察钩子，不是循环的一环**：它不改变终止条件、
 		// 不参与回填、抛了也只影响一个统计数字（`onFirstText` 由调用方实现，

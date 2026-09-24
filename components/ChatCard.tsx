@@ -23,6 +23,7 @@ import {
 } from 'ai';
 import { useEffect, useRef, useState } from 'react';
 import type { ToolOutcome } from '@/contract/tool';
+import { approvalView } from './approval-view';
 
 /**
  * 工具名的中文标签；未登记的走原始名。
@@ -60,6 +61,10 @@ type Trace = { name: string; ok: boolean; ms?: number; text?: string };
  * 这里是**业务形状与 SDK 形状的交界**：`output` 就是 `execute` 的返回值，也就是
  * `contract/tool.ts` 的 `ToolOutcome`，所以 `ok` / `ms` 直接可读；工具还没跑完
  * （`input-streaming` / `input-available`）时三者都缺，卡片显示「执行中」。
+ *
+ * ⚠️ 审批那两种状态（`approval-requested` / `output-denied`）**在渲染里被提前拦掉**
+ * 了，走不到下面这个「执行中…」的兜底 —— 否则用户会一直等一件不会发生的事。
+ * 这里仍然各给一句，是为了这个函数单独被调用时也是对的。
  */
 function traceOf(part: ToolUIPart): Trace {
 	const name = getToolName(part);
@@ -68,6 +73,8 @@ function traceOf(part: ToolUIPart): Trace {
 		return { name, ok: out?.ok ?? true, ms: out?.ms, text: out?.text };
 	}
 	if (part.state === 'output-error') return { name, ok: false, text: part.errorText };
+	if (part.state === 'approval-requested') return { name, ok: true, text: '等你确认' };
+	if (part.state === 'output-denied') return { name, ok: false, text: '你没有批准，这一步没有执行' };
 	return { name, ok: true };
 }
 
@@ -122,9 +129,20 @@ type Props = {
 	error?: Error;
 	onSend: (text: string) => void;
 	onStop: () => void;
+	/**
+	 * 回应一次「需要你确认」的请求（`agent/run.ts` 的 `toolApproval` 发起的）。
+	 *
+	 * ⚠️ 不传 = 界面上不出现批准按钮，而服务端那一轮**会永远停在那里等一个
+	 * 不会到来的回答**（界面上看起来只是"它不动了"，没有报错）。所以路由必须接。
+	 *
+	 * ⚠️ 但只有**最后一条消息**上的确认框会把按钮接到它：`addToolApprovalResponse`
+	 * 只更新最后一条消息里的 part，更早的那些框即使留着按钮也是死控件
+	 * （选档的规则在 `approval-view.ts`，带单测）。
+	 */
+	onApproval?: (id: string, approved: boolean) => void;
 };
 
-export function ChatCard({ messages, status, error, onSend, onStop }: Props) {
+export function ChatCard({ messages, status, error, onSend, onStop, onApproval }: Props) {
 	const [input, setInput] = useState('');
 	const listRef = useRef<HTMLDivElement>(null);
 	const taRef = useRef<HTMLTextAreaElement>(null);
@@ -175,7 +193,7 @@ export function ChatCard({ messages, status, error, onSend, onStop }: Props) {
 					</div>
 				)}
 
-				{messages.map((m) => (
+				{messages.map((m, mi) => (
 					<div
 						key={m.id}
 						className={m.role === 'user' ? 'flex justify-end' : 'flex flex-col items-start gap-1.5'}
@@ -200,6 +218,88 @@ export function ChatCard({ messages, status, error, onSend, onStop }: Props) {
 							// 不存在 `dynamic-tool`，用 isToolUIPart 会把它的分支也拉进来。
 							if (isStaticToolUIPart(part)) {
 								const trace = traceOf(part);
+								// 这个框该不该给按钮，由**位置**决定而不只是状态（见 `approval-view.ts`）：
+								// 非最后一条上的待确认框若渲染成可点按钮就是个**死控件** ——
+								// 点下去没有任何反应、也没有任何报错，用户只会以为是网络慢。
+								const view = approvalView(part.state, mi === messages.length - 1);
+
+								// 「等你点头」的那一步（见 `agent/run.ts` 的 `toolApproval`）。
+								// **不是错误**，所以外观走品牌色 + 两个按钮，而不是失败色 ——
+								// 「等你确认」与「工具失败了」是两种完全不同的处境。
+								//
+								// 后半个条件不是规则的一部分（规则就是 `view === 'buttons'`），
+								// 它只是把类型收窄到带 `approval` 的那一支：TS 看不出
+								// 「两个字符串相等」这层关系，不写它就取不到 `part.approval.id`。
+								if (view === 'buttons' && part.state === 'approval-requested') {
+									return (
+										<div
+											key={part.toolCallId}
+											className="w-full rounded-xl border border-brand/40 bg-brand-soft px-2.5 py-2 text-[11px] leading-snug"
+										>
+											<p>
+												<span className="font-medium text-foreground">
+													{TOOL_LABEL[trace.name] ?? trace.name}
+												</span>
+												<span className="ml-1.5 opacity-80">需要你确认</span>
+											</p>
+											<p className="mt-0.5 text-muted">这一步做完就回不来了，所以要你点一下。</p>
+											<div className="mt-1.5 flex gap-1.5">
+												<button
+													type="button"
+													onClick={() => onApproval?.(part.approval.id, true)}
+													className="rounded-lg bg-brand px-2.5 py-1 text-[11px] font-medium text-white transition hover:opacity-90"
+												>
+													执行
+												</button>
+												<button
+													type="button"
+													onClick={() => onApproval?.(part.approval.id, false)}
+													className="rounded-lg border border-border px-2.5 py-1 text-[11px] text-muted transition hover:bg-surface-2 hover:text-foreground"
+												>
+													算了
+												</button>
+											</div>
+										</div>
+									);
+								}
+
+								// **已经越过这一步**的待确认框（刷新之后它退到了历史中间）。
+								// 不给按钮：`addToolApprovalResponse` 只认最后一条消息，点了不会有
+								// 任何事发生。而且必须**说清它没有执行** —— 否则用户会以为自己在
+								// 等一件正在跑的事，而服务端那一轮其实早就结束了。
+								if (view === 'stale') {
+									return (
+										<div
+											key={part.toolCallId}
+											className="w-full rounded-xl border border-border bg-surface-2 px-2.5 py-1.5 text-[11px] leading-snug text-muted"
+										>
+											<span className="font-medium text-foreground">
+												{TOOL_LABEL[trace.name] ?? trace.name}
+											</span>
+											<span className="ml-1.5">这一步没有执行（这次确认已经作废）</span>
+											<p className="mt-0.5 text-[10px] opacity-80">
+												只有对话最后一步的确认能点；要真做，再跟助手说一句。
+											</p>
+										</div>
+									);
+								}
+
+								// 答复过、但**被拒**的那一步。必须与「还在跑」分开：两者在下面
+								// 那一支里都会显示「执行中…」，用户于是会一直等一件不会发生的事。
+								if (view === 'denied') {
+									return (
+										<div
+											key={part.toolCallId}
+											className="w-full rounded-xl border border-border bg-surface-2 px-2.5 py-1.5 text-[11px] leading-snug text-muted"
+										>
+											<span className="font-medium text-foreground">
+												{TOOL_LABEL[trace.name] ?? trace.name}
+											</span>
+											<span className="ml-1.5">已放弃（你没有批准）</span>
+										</div>
+									);
+								}
+
 								return (
 									<div
 										key={part.toolCallId}

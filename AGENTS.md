@@ -16,13 +16,13 @@
 | 目录 | 放什么 |
 |:---|:---|
 | `app/` | 路由 + 页面外壳。`page.tsx` 是**服务端外壳**（读一次对话历史当 props 递下去，因此没有 `'use client'`，且必须 `export const dynamic = 'force-dynamic'`）；`home-client.tsx` 是浏览器主体；`app/api/**/route.ts` 每个只做「解析参数 → 调域逻辑 → 包信封」 |
-| `components/` | 浏览器侧组件与纯函数模块（**不设 `lib/` 子目录**）。需要 React 渲染的不写单测，无 React 依赖的纯模块要写 |
+| `components/` | 浏览器侧组件与纯函数模块（**不设 `lib/` 子目录**）。需要 React 渲染的不写单测，无 React 依赖的纯模块要写（`panel-layout.ts`、`storage-keys.ts`、`approval-view.ts` —— 凡是「选错一档就不报错」的判定，都该提到 `.ts` 里来） |
 | `contract/` | 前后端**共享契约**，零业务依赖。前端能引用的服务端类型只能来自这里 |
 | `agent/` | Agent 本体：`provider`（接入）/ `run`（循环）/ `tools`（工具）/ `prompt`（提示词）。**不 import `server/`**——工具用 HTTP 打自家 BFF。十个部件的落点见 [BLUEPRINT.md](./BLUEPRINT.md) |
 | `server/` | 业务实现。根只留 `http.ts`（信封）与 `db.ts`（连接），其余归入 `agent/ library/ player/ records/` |
 | `telemetry/` `eval/` | **已不存在**（随最简化删除），别再往这里加东西 |
-| `scripts/` | 给开发者自己用的脚本：`api-smoke.mjs` 接口体检 · `turns.mts` 看观测 · `cases.mts` 失败案例集 · `tasks-tick.mts` 打一次 ⑩ 的 tick · `auto-tag.mts` AI 打标 |
-| `cases/` | **失败案例集**（`failure-cases.json`）—— 「某条 prompt 补丁还需不需要」的判据。它是**测 agent 的**，不是 agent 的一部分：不在 `agent/` 里、不被 `app/` 引用、不参与构建（BLUEPRINT §6） |
+| `scripts/` | 给开发者自己用的脚本：`api-smoke.mjs` 接口体检 · `turns.mts` 看观测 · `cases.mts` 失败案例集 · `cases-diff.mts` 对比两份报告 · `tasks-tick.mts` 打一次 ⑩ 的 tick · `auto-tag.mts` AI 打标 |
+| `cases/` | **失败案例集**：`failure-cases.json`（判据）+ `report.ts`（报告形状与「该不该删」的判定）。它是**测 agent 的**，不是 agent 的一部分：不在 `agent/` 里、不被 `app/` 引用、不参与构建（BLUEPRINT §6） |
 | `data/` | `music/` 是曲库源码资产；`app.db` 是运行时派生数据（gitignore） |
 
 **依赖方向是单向的**：`app → server → contract`；`components → contract`（只 `import type`）；
@@ -239,6 +239,35 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
 - **加一条路由 = 三处**：① `app/api/**/route.ts`；② README 的「API 一览」表（标题里那个数字也要改）；
   ③ 决定它进不进冒烟 —— 进的话记得**它写不写真实状态**（见上面那条）。
   **只增路由不改表**是最容易漏的，而不改的后果是"这个接口没人知道它存在"（不报错）。
+- **给一个工具加确认闸门要同时改四处，其中两处「不写对也不报错」**：
+  ① `agent/run.ts` 的 `toolApproval`（`streamText` 的**原生选项**，与 `stopWhen` 同一层）
+  里加一行 `工具名: 'user-approval'`。
+  ⚠️ **不是**在 `agent/tools.ts` 里给工具加 `needsApproval` —— 那个选项在本版
+  `@ai-sdk/provider-utils` 的类型里已标 `@deprecated`（原文："Tool approval is handled on a
+  `generateText` / `streamText` level now"）。照旧写法加**不报错**（类型仍是 `boolean`），
+  于是仓里会长出两套并存的写法，而"哪一套在生效"没人说得清。
+  判据是「**删的是用户的东西**」，不是"危险"这种说不清的词 ——
+  本项目只有 `forget_preference` / `cancel_scheduled_task` 两个；
+  ② `components/ChatCard.tsx` 渲染待确认框（`approval-requested`）与「执行 / 算了」两个按钮，
+  外加答复后的文案（「已放弃（你没有批准）」）；
+  ③ **只有最后一条消息上的确认框配拥有按钮**：`addToolApprovalResponse` 只更新
+  `messages[messages.length - 1]` 里的 part（`AbstractChat` 的实现就这么写的），
+  所以刷新后**退到历史中间**的那个框，留着按钮就是**死控件**（点了没反应、控制台零报错）。
+  选档的规则提在 `components/approval-view.ts`（纯函数 + 单测，含验红），
+  非最后一条渲染成「这一步没有执行（这次确认已经作废）」；
+  ④ `agent/run.ts` 的 `toolCallPruningFor()` —— **这一处选错档，`tsc` / 单测 / 服务端日志
+  一个都不留痕**：审批续跑那一轮 `convertToModelMessages` 把答复放进**一条新的 `tool` 消息**，
+  于是 `pruneMessages` 的 `before-last-message` 把这个"最后一条"当成了窗口边界，带 `tool-call`
+  的 assistant 退到窗口外 → `tool-call` 被剪而 `tool-approval-request` 留着 → 服务端
+  `collectToolApprovals` 抛 `ToolCallNotFoundForApprovalError`。症状是**界面只多一句英文报错**
+  （2026-09-24 端到端实测；修复后 `toolCallPruningFor` 有单测直接钉住这两档）。
+- ⚠️ **被落库的 `approval-requested` part 会跟着历史一起回来**：`messages` 存 parts 全量，
+  刷新后旧消息上那个框会**重新出现**（界面现在按上面 ③ 渲染成「这一步没有执行
+  （这次确认已经作废）」，不再给按钮）。**测确认闸门时这条照样会咬人**：DOM 里可能同时有多个
+  框，而只有**最后一条**上那个是活的 —— 所以**必须打在全新空库的实例上，并断言
+  「DOM 里只有一个待确认框」**，不然你点的是历史里那个，测出来的"没生效"是假的
+  （2026-09-24 探针的第一次测量就栽在这里）。**「点了没反应」与「这个框已经作废」
+  在只看结果时长得一模一样**，这正是它值得单独断言的理由。
 - **工具失败的种类走 `contract/tool.ts` 的 `ToolFailureKind`**：判据是「**谁来修**」
   （`bad_request` 模型能改参数 / `not_found` 别重试 / `forbidden` 得人去配 /
   `unavailable` 稍后重试 / `transport` 服务没跑 / `unknown` 不确定），
@@ -318,14 +347,45 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
   （没人敢删一条"有失败案例守着"的东西）。2026-09-23 实测：关掉补丁那一版的两条红全是
   网关的事（120s 超时 + Connection closed），基线因此正确判红、整轮作废。
 
+### 两份报告怎么比（`npm run cases:diff`）
+
+`cases.mts` 一次只跑一版（它只认识一个 `BASE`），所以它的报告只能给一半结论。**"还需不需要"是
+两个数之差**，由 `cases-diff.mts` 判，判定逻辑在 `cases/report.ts` 的 `patchVerdict()`：
+
+```bash
+BASE=http://127.0.0.1:3200 CASES_REPORT=full.json  CASES_LABEL=full        npm run cases
+BASE=http://127.0.0.1:3201 CASES_REPORT=no-ws.json CASES_LABEL=no-work_style npm run cases
+npm run cases:diff -- full.json no-ws.json
+```
+
+- **方向不看标签，看响应头**：哪份是"带补丁"由 `disabled`（`x-prompt-disabled` 原样记下来的）
+  判出来 —— 手写的 `CASES_LABEL` 可能写反，响应头不会。
+- **判定抽成纯函数是为了它能被断言**（`cases/report.test.ts`）：它是唯一会说出"可以删"的地方，
+  而删掉一条还在做事的补丁**不可逆**（补丁的存在理由就是那几条失败案例，删了没人会再验）。
+  **编排在脚本里、判定在模块里** —— 脚本里写的分支等于没有测试。
+- ⚠️ **`shared` 的两侧必须各取自己那份对象**：早先版本只从"带补丁"那份取共享 case，于是
+  `withoutBad` 恒为空 → **每条补丁都被判成 `removable`（可以删）**。单测抓到过一次，
+  改那段时别图省事"统一成一个 `shared`"。
+- **六种"拒绝下结论"**（每一种都会让人误删）：`not-comparable`（有一份版本/开关说不清）·
+  `no-direction`（两次同向，只能看稳定性）· `no-evidence`（没有守着它的 case）·
+  `with-failing`（**带补丁那版自己也红**，先查它为什么红）· `inconclusive`（关掉之后的失败
+  **全是**环境类）。只有 `working` / `removable` 算明确结论，退出码 0 = 每条都有结论、1 = 有测不出。
+- ⚠️ **`infra` 缺字段必须抛，不许默认 `false`**：默认值的含义正好是"这条失败可以归因给补丁"，
+  于是一个缺字段的旧报告会变成一条虚假的"保留"证据（`parseReport` 里那条硬规则）。
+
 ---
 
 ## 静态检查
 
 - `npx tsc --noEmit` 覆盖全仓（`tsconfig.json` 用**显式 include 列表**，不是 `**/*`）。
   **新增顶层目录 / 新后缀时要回来补 include** —— 漏了的后果是那个目录**既不被 tsc 看、
-  也没人提醒**（`scripts/**/*.mts` 已在列表里，所以 `tasks-tick.mts` 这类脚本是被检查的；
-  而 `scripts/*.mjs`（`api-smoke.mjs`）不在列表里，只靠 ESLint 与"跑一遍"兜着）。
+  也没人提醒**（`scripts/**/*.mts` 与 `cases/**/*.ts` 已在列表里，所以 `tasks-tick.mts` 与
+  `cases/report.ts` 这类是被检查的；而 `scripts/*.mjs`（`api-smoke.mjs`）不在列表里，
+  只靠 ESLint 与"跑一遍"兜着）。
+  ⚠️ **`moduleResolution: bundler` 不认带 `.mts` 扩展名的相对导入**（`TS5097`），
+  所以 `scripts/*.mts` 之间不能 `import './x.mts'`、也不能（extensionless）解析到 `.mts`。
+  共享模块要么放 `.ts` 目录（`cases/report.ts` 就是这么定下来的），要么开
+  `allowImportingTsExtensions` 动全仓 tsconfig —— 别把共享模块悄悄放进 `scripts/` 里躲检查。
 - `npm run lint`（ESLint 9 + `eslint-config-next`）。
   注意 `react-hooks/set-state-in-effect` 很严：localStorage 还原 / 广播订阅这类 effect
   需要 `/* eslint-disable react-hooks/set-state-in-effect */` 包裹。

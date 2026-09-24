@@ -40,6 +40,10 @@
  *                `cost_micro` 存**微美元整数**（浮点进 SQLite 会带上 0.1+0.2 那种尾巴），
  *                NULL = **没配价目表**，不是 0 —— 0 会被读成「这一轮免费」；
  *                `first_token_ms` NULL = 这一轮**一个字都没吐过**（被掐掉 / 中断）。
+ *                `budget_hit`（2026-09-24 加）= 这一轮**因成本上限被停住**。
+ *                ⚠️ 它必须与 `truncated` 分开：两者症状一样（最后一步都在调工具、
+ *                都没把话说完整），但一个该调大 `MAX_STEPS`、一个该调大预算 ——
+ *                合成一个标记，诊断就必然朝错的方向改。
  *   tasks        ⑩ 触发器，一行 = 一件**跨轮的目标**（不是一次工具调用）。
  *                `goal` 是模型自己写下的一句话（"用户想让我做到什么"），
  *                `due_at` 是"什么时候该做"，`repeat` 有 none / daily / weekly 三档，
@@ -96,6 +100,11 @@ const ADDED_COLUMNS: Record<string, { name: string; ddl: string }[]> = {
 		{ name: 'model', ddl: 'TEXT' },
 		{ name: 'cost_micro', ddl: 'INTEGER' },
 		{ name: 'first_token_ms', ddl: 'INTEGER' },
+		// 成本闸门（`agent/run.ts` 的 `overBudget`）把这一轮截断了吗。
+		// 为什么不复用 `truncated`：两者在**症状上长得一样**（最后一步都在调工具、
+		// 都没把话说完整），而下一步动作完全不同 —— 一个该调大 `MAX_STEPS`、
+		// 一个该调大预算。合成一列就等于让诊断给出一个错的方向。
+		{ name: 'budget_hit', ddl: 'INTEGER' },
 	],
 	tasks: [
 		// weekly 的"哪几天"。老库里已有的任务都是 none / daily，这一列为 NULL 正是
@@ -177,7 +186,8 @@ function migrate(db: DatabaseSync): void {
 			prompt_disabled TEXT,
 			model           TEXT,
 			cost_micro      INTEGER,
-			first_token_ms  INTEGER
+			first_token_ms  INTEGER,
+			budget_hit      INTEGER
 		);
 
 		CREATE TABLE IF NOT EXISTS tasks (
