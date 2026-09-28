@@ -40,6 +40,7 @@ import {
 import { APlayerPlayer } from '@/components/APlayerPlayer';
 import { ChatCard } from '@/components/ChatCard';
 import { GlobalHotkeys } from '@/components/GlobalHotkeys';
+import { HistoryCard } from '@/components/HistoryCard';
 import { LayoutMenu } from '@/components/LayoutMenu';
 import { LayoutProvider, useLayout } from '@/components/LayoutProvider';
 import { LibraryGrid } from '@/components/LibraryGrid';
@@ -201,6 +202,13 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 				);
 			case 'lyrics':
 				return <LyricsPanel />;
+			case 'history':
+				// `refreshKey` 用「当前曲目 + 队列位置」：能往 `plays` 表写一行的只有
+				// 「开始播一首」（点播 / 下一首 / 跳转 / 换一批队列，含 agent 用工具触发的），
+				// 而这几种都会让这两个值之一变 —— 服务端权威的那几项经 SSE 推过来。
+				// ⚠️ **同一首重播**不改变它们，所以那一次不会自动重取；补上它的是
+				// 「切到这张卡时重新挂载 → 现取」（见 `HistoryCard.tsx` 的文件头）。
+				return <HistoryCard refreshKey={`${track?.id ?? ''}#${snap.queueIndex}`} />;
 			case 'memory':
 				// `refreshKey` 与 `tasks` 同一个理由、同一条链：能改到这份清单的只有
 				// 「跟助手说记住 / 忘掉」（工具）与「在这张卡上点忘掉」两条路，

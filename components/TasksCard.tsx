@@ -18,6 +18,7 @@
 'use client';
 import { useCallback, useEffect, useState } from 'react';
 import { repeatLabel, type Task, type TaskStatus } from '@/contract/task';
+import { formatScheduledAt } from './local-time';
 
 const STATUS_LABEL: Record<TaskStatus, string> = {
 	pending: '待执行',
@@ -35,30 +36,11 @@ function statusClass(status: TaskStatus): string {
 	return 'text-muted';
 }
 
-/**
- * 时间给人看的样子：`09-24 周四 07:00`。
- *
- * 按**浏览器本地时区**渲染（`Intl` 默认行为）。这与模型看到的
- * `formatAbsolute`（同样本地、含星期）形状接近但不强求一致：模型需要的是
- * 一个**不会动的对账锚**，用户需要的是「这事什么时候发生」——
- * 两者都从同一个 ISO 串来，时刻不会差。
+/*
+ * 时间给人看的样子（`09-24 周四 07:00`）现在住在 `./local-time.ts` —— 「播放历史」卡
+ * 也要把 ISO 串摆到界面上，两处各写一份就是同一份规则两处实现。
+ * 两处的**需求不同**（排期要一个不会动的锚，历史要相对距离），所以那边是两个导出。
  */
-function formatWhen(iso: string): string {
-	const at = new Date(iso);
-	if (Number.isNaN(at.getTime())) return iso; // 脏值原样显示，不编一个时间出来
-	try {
-		return new Intl.DateTimeFormat('zh-CN', {
-			month: '2-digit',
-			day: '2-digit',
-			weekday: 'short',
-			hour: '2-digit',
-			minute: '2-digit',
-			hour12: false,
-		}).format(at);
-	} catch {
-		return iso;
-	}
-}
 
 type TaskList = { open: Task[]; closed: Task[] };
 
@@ -154,7 +136,7 @@ export function TasksCard({ refreshKey }: { refreshKey?: number }) {
 										{t.goal}
 									</p>
 									<p className="mt-0.5 text-[10px] text-muted">
-										<span className="tabular-nums">{formatWhen(t.dueAt)}</span>
+										<span className="tabular-nums">{formatScheduledAt(t.dueAt)}</span>
 										{repeatLabel(t.repeat, t.repeatDays) && (
 											<span className="ml-1.5 text-brand/80">
 												{repeatLabel(t.repeat, t.repeatDays)}

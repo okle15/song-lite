@@ -193,6 +193,11 @@ export function NowPlaying() {
 	return (
 		// min-h 保证封面 + 进度条 + 传输控制 + 模式胶囊在面板被拖小时仍完整，
 		// 超出部分由 PaneShell 的内容区滚动兜住，而不是被 overflow-hidden 裁掉。
+		// ⚠️ 实测（2026-09-28，默认布局）：这一格只有 266px（1920×1080 时 333px），
+		// 内容 320px → 传输控制要**卡内滚 97px / 30px** 才看得全。这是**有意接受**的：
+		// 底部 `PlayerBar` 是常驻的统一播放条，播放/暂停从不需要滚；这张是「英雄卡」，
+		// 滚一下看模式胶囊可以接受。**要改就得连着默认权重一起改**（见 `panel-layout.ts`
+		// 注释里那两条判据：同列每格都要高于 150px 地板，否则整页出滚动条）。
 		<div className="relative h-full min-h-[320px] overflow-hidden text-center">
 			{/* 顶部辉光：播放时增强 */}
 			<div

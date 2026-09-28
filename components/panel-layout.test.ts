@@ -11,7 +11,9 @@
  * 「⌘K 唤起音乐助手卡」这类交互逻辑的地方（真正的渲染交给浏览器验收）。
  */
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { SPLIT_HANDLE_PX } from './SplitHandle';
 import {
 	ALL_CARD_IDS,
 	MAX_COL_FILL,
@@ -326,4 +328,56 @@ test('外来布局的 colFill > 1：保留，不回退默认', () => {
 		hidden: [],
 	});
 	assert.deepEqual(l.colFill, [1.8, 0.6]);
+});
+
+/**
+ * 从 globals.css 里读**宽屏（lg）下 `.pane-item` 的 min-height 地板**。
+ *
+ * 为什么不在这里再写一个 `150`：地板是 CSS 里的事实，抄一份到测试就等于
+ * 有第二个出处，改了 CSS 这边不会知道。解析不出来返回 `null`，
+ * 调用方**断言失败**——「读数失败」与「数值合格」必须分开，
+ * 否则改了 CSS 结构之后这条用例会静静地永远通过。
+ */
+function lgPaneMinHeight(css: string): number | null {
+	const media = css.match(/@media\s*\(min-width:\s*1024px\)\s*\{([\s\S]*?)\n\}/);
+	if (!media) return null;
+	const rule = media[1].match(/\.pane-item\s*\{([\s\S]*?)\}/);
+	if (!rule) return null;
+	const mh = rule[1].match(/min-height:\s*(\d+(?:\.\d+)?)px/);
+	return mh ? Number(mh[1]) : null;
+}
+
+/**
+ * 默认布局必须**在参考窗口下铺得下**——这是一条几何判据，不是感觉。
+ *
+ * 为什么需要它：`.pane-item` 在 lg 下有一块 **min-height 地板**。按权重分到的
+ * 高度一旦低于地板，那一格会被顶高，整列就比列高还高 → **main 出现滚动条**。
+ * 2026-09-28 给左列加第 4 张卡时正是这么顶出 22px 的，而 tsc / eslint / 单测 /
+ * 接口冒烟**四处全绿**，挨个看每张卡也都是好的 —— 只有量整页才看得见。
+ *
+ * 参考值（1440×900 实测，出处见 `panel-layout.ts` 的 `defaultLayout` 注释）：
+ * 列高 738px；同列 N 张卡 → N 条分隔条各占 `SPLIT_HANDLE_PX`。
+ * 所以「整列铺得下」= **每一格**分到的高度都 ≥ 地板。
+ */
+test('默认布局：同列每格分到的高度都高于地板（否则整列被顶高、整页出滚动条）', () => {
+	const css = readFileSync(new URL('../app/globals.css', import.meta.url), 'utf8');
+	const floor = lgPaneMinHeight(css);
+	assert.ok(
+		floor !== null,
+		'读不出 lg 下 `.pane-item` 的 min-height —— globals.css 的结构变了就要同步改这条用例（不许降级成「跳过」）',
+	);
+
+	const REF_COL_H = 738; // 1440×900 实测的列高
+	for (const [colIdx, col] of defaultLayout().columns.entries()) {
+		const totalFlex = col.reduce((s, p) => s + p.flex, 0);
+		const usable = REF_COL_H - col.length * SPLIT_HANDLE_PX;
+		for (const pane of col) {
+			const px = (usable * pane.flex) / totalFlex;
+			assert.ok(
+				px >= floor,
+				`列${colIdx} 的 ${pane.id} 只分到 ${px.toFixed(1)}px，低于地板 ${floor}px —— ` +
+					'这一格会被地板顶高、整列比列高还高，main 于是出现滚动条（不报错）',
+			);
+		}
+	}
 });

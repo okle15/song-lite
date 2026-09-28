@@ -1,7 +1,7 @@
 /**
  * 可配置面板布局：类型 / 默认值 / 持久化 / 变更操作。
  *
- * 需求：面板里的**每一张卡片**（音乐助手 / 歌词 / 正在播放 / 播放队列 / 定时任务 / 记忆）要能
+ * 需求：面板里的**每一张卡片**（音乐助手 / 歌词 / 播放历史 / 正在播放 / 播放队列 / 定时任务 / 记忆）要能
  *   1) 自由拉伸（Pane 之间的分隔条调高度，两列之间调宽度）
  *   2) 合并成标签页（一个 Pane 内放多张卡片，Tab 切换）
  *   3) 隐藏 / 恢复
@@ -12,10 +12,11 @@
  */
 import { LS_KEYS } from './storage-keys';
 
-export type CardId = 'chat' | 'lyrics' | 'memory' | 'nowplaying' | 'queue' | 'tasks';
+export type CardId = 'chat' | 'history' | 'lyrics' | 'memory' | 'nowplaying' | 'queue' | 'tasks';
 
 export const CARD_LABELS: Record<CardId, string> = {
 	chat: '音乐助手',
+	history: '播放历史',
 	lyrics: '歌词',
 	memory: '记忆',
 	nowplaying: '正在播放',
@@ -23,7 +24,15 @@ export const CARD_LABELS: Record<CardId, string> = {
 	tasks: '定时任务',
 };
 
-export const ALL_CARD_IDS: CardId[] = ['chat', 'lyrics', 'memory', 'nowplaying', 'queue', 'tasks'];
+export const ALL_CARD_IDS: CardId[] = [
+	'chat',
+	'history',
+	'lyrics',
+	'memory',
+	'nowplaying',
+	'queue',
+	'tasks',
+];
 
 export type Pane = {
 	id: string;
@@ -66,7 +75,7 @@ export type Layout = {
 const STORAGE_KEY = LS_KEYS.layout;
 
 /**
- * 默认布局：左列 = 音乐助手 / 歌词 / 记忆，右列 = 正在播放 / 播放队列 / 定时任务。
+ * 默认布局：左列 = 音乐助手 / 歌词 / 记忆 / 播放历史，右列 = 正在播放 / 播放队列 / 定时任务。
  *
  * 每张卡默认各自独立成一格，**不预先合并成标签页**：这样分隔条、拖拽手柄、
  * 合并 / 拆分这些能力一进来就都有可操作对象，而不是藏在一层菜单后面。
@@ -77,19 +86,43 @@ const STORAGE_KEY = LS_KEYS.layout;
  * 「与 ALL_CARD_IDS 完全一致」的用例就是为此存在的）。老用户的布局不含这张卡，
  * 走的是另一条路：`sanitizeLayout` 会把它补进 `hidden`，从「卡片」菜单恢复。
  *
- * `memory`（⑥ 的界面）加在**左列末位**，紧挨着 `chat` —— 它是「助手记住了我什么」，
- * 与对话是同一件事的两面（一个说、一个记），挨着放才读得出这层关系。
- * ⚠️ 它在**左列**不是右列：右列那时已经 3 张卡，再塞一张会让每张都矮到只剩一行
- * —— 「卡片里的主按钮被挤出可视区」那一类事故就是这么来的（按钮落在滚动区里，
- * 点下去零反应、控制台零报错）。
+ * `memory`（⑥ 的界面）加在**左列** —— 它是「助手记住了我什么」，与对话是同一件事的
+ * 两面（一个说、一个记），挨着放才读得出这层关系。
+ *
+ * `history`（`/api/history` 的界面，2026-09-28）也加在**左列末位**，权重给得最小：
+ * 它是「扫一眼最近听过什么」，不需要和歌词平分高度。
+ *
+ * ⚠️ 但加这一张**真的把整页顶出过一次滚动**（2026-09-28 实测，1440×900：
+ * `main.scrollHeight` 792 > `clientHeight` 770 —— 溢出 22px，对照 HEAD 是 0）。
+ * 原因不是「同列几张」，而是**同列每张卡都有一块地板**：`.pane-item` 在 lg 下
+ * `min-height: 150px`（globals.css）。按权重算出来的高度一旦低于地板，那一格就被顶高，
+ * 整列于是比列高还高 —— 而这件事**四处都看不出来**：tsc / eslint / 单测 / 接口冒烟
+ * 全绿，挨个看每张卡也都是好的，只有量整页才看得见。
+ *
+ * 所以「新卡放哪一列、权重给多少」要同时满足两条判据（都不是「同列几张」）：
+ *   ① **那张卡的主按钮会不会被挤出可视区**（「卡片里的主按钮必须固定在滚动区之外」）；
+ *   ② 参考窗口（1440×900，列高实测 738px，N 张卡 → N 个分隔条各 `SPLIT_HANDLE_PX`）
+ *      下，同列**每一格**按权重分到的高度都要**高于地板**：
+ *      可分配 = 738 − N×8，某格 = 可分配 × flex / 列内 flex 之和。
+ * 下面这组权重就是按 ② 配出来的（左列 4 张：最少的占 0.2195 × 706 ≈ 155px > 150）。
+ * `panel-layout.test.ts` 里那条「同列每格都高于地板」的用例守着它 —— 没有它，
+ * 下一次加卡或调权重会**静默**再顶出一截滚动。
+ *
+ * 反向的一格：右列「正在播放」只有 266px，而它声明了 `min-h-[320px]` ——
+ * 传输控制要**卡内滚 97px** 才看得全（1920×1080 下还要 30px）。这是**既有状态、
+ * 且被接受**：底部 `PlayerBar` 是常驻的统一播放条，播放/暂停从不需要滚；
+ * 那张卡是「英雄卡」，滚一下看模式胶囊可以接受。见 `NowPlaying.tsx` 的注释。
  */
 export function defaultLayout(): Layout {
 	return {
 		columns: [
 			[
-				{ id: 'pane-chat', cards: ['chat'], active: 'chat', flex: 1.15 },
-				{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.3 },
-				{ id: 'pane-memory', cards: ['memory'], active: 'memory', flex: 0.8 },
+				// 左列 4 张：权重按「每格都高于 150px 地板」配（见上方注释 ②）。
+				// 对话给得最多（输入框 + 消息列表），播放历史最少（扫一眼）。
+				{ id: 'pane-chat', cards: ['chat'], active: 'chat', flex: 1.2 },
+				{ id: 'pane-lyrics', cards: ['lyrics'], active: 'lyrics', flex: 1.05 },
+				{ id: 'pane-memory', cards: ['memory'], active: 'memory', flex: 0.95 },
+				{ id: 'pane-history', cards: ['history'], active: 'history', flex: 0.9 },
 			],
 			[
 				{ id: 'pane-nowplaying', cards: ['nowplaying'], active: 'nowplaying', flex: 1.25 },
