@@ -13,7 +13,7 @@
  * `.gitignore` 已忽略。刻意**不开 WAL**：默认 journal 模式下落盘只有单个
  * `.db` 文件，不留 `-wal` / `-shm` 尾巴——「删一个文件就干净」是有意保留的性质。
  *
- * ── 表结构（2026-09-17 加 agent_turns）─────────────────────────────────
+ * ── 表结构（2026-09-17 加 agent_turns；2026-09-28 加 favorites / hidden / 歌单两张）──
  *   plays        播放历史，一行 = 一次「开始播放某首歌」
  *   messages     对话历史，一行 = 一条 UI 消息（user 或 assistant）
  *   preferences  ⑥ 记忆，一行 = 一条关于用户的持久偏好（key 唯一，再记即覆盖）
@@ -23,6 +23,23 @@
  *                为什么它必须落库：ID3 里那个 genre 字段本身是不可信的
  *                （本曲库 6 首中文流行全被标成 blues），而「这首算什么风格」
  *                既需要模型判断、又需要尊重用户的主观偏好 —— 两者都不在文件里。
+ *   favorites    收藏，一行 = 一首被收藏的歌（track_id 唯一）。
+ *   hidden       屏蔽，一行 = 一首「以后别再自动给我放」的歌（track_id 唯一）。
+ *                这两张表**都是「人的偏好」**，不是「设备的事实」——
+ *                所以真相在服务端（判据见 `contract/library-flags.ts` 文件头）。
+ *                收藏原本只活在前端 localStorage，后果是 agent 完全看不见
+ *                （既答不了「我收藏了哪些」，也没法说「帮你收起来了」）。
+ *                分两张表而不是一列二值：`收藏` 与 `屏蔽` 是**两个可以同时为真**
+ *                的判断（先收藏、后来听腻了屏蔽），合成一张表会让「这行为什么在」
+ *                必须看列才知道。
+ *                `hidden` 的消费者是 `getSongs()` —— 可见曲库的唯一产出点，
+ *                见 `server/library/visible.ts`（过滤点只有一处，红线①）。
+ *   playlists    歌单，一行 = 一份歌单。`id` 是**不透明的生成串**：名字会改，
+ *                而改名不该变成一次数据迁移（判据见 §2.3：改「唯一标识」= 迁移）。
+ *   playlist_items 歌单里的曲目，一行 = 「这份歌单里有这一首」。
+ *                ⚠️ **刻意没有「整表替换」的入口**：加是追加、删是按 id 删一行。
+ *                因为模型只看得到清单的一页，让它"写回这一批"就会悄悄换走其余那些
+ *                （理由与形状见 `contract/playlist.ts` 的文件头）。
  *   agent_turns  ⑨ 观测，一行 = **一轮对话**（不是一条消息）。`id` 就是那一轮
  *                assistant 消息的 id，与 `messages` 表同一个主键，可直接 join。
  *                为什么落库：⑨ 存在的意义是「事后能回答它哪次答错、慢在哪、
@@ -61,12 +78,16 @@
  *                它只能算成残差（轮耗时 − 工具耗时），里面还混着网络与排队，
  *                叫成"模型耗时"就是把推算说成实测（见 `turn-log.ts` 的 `summarizeSpans`）。
  *
- * 七张表的**失败语义不同**，不是不一致而是有意：
+ * 十一张表的**失败语义不同**，不是不一致而是有意：
  *   plays / messages / agent_turns 是旁路记录，写失败只 log 不抛（不该打断播放或对话）；
- *   preferences / track_tags 是 agent 对用户的**承诺**（它说了「记住了」就该真记住），
+ *   preferences / track_tags / favorites / hidden / playlists / playlist_items 是 agent
+ *   对用户的**承诺**（它说了「记住了」/「帮你收起来了」/「建好了」就该真做到），
  *   所以写失败要抛到路由 → 变成工具失败 → 模型据实告诉用户。
+ *   ⚠️ 其中 `hidden` 的**读**侧反向放宽（读失败按"没有屏蔽"处理）：它的读取者
+ *   是整条曲库链路，读失败就抛等于整个曲库打不开 —— 旧的比坏的好。理由写在
+ *   `server/library/flags.ts` 的文件头。
  *
- * 之后要加表（歌单 / 标签 / 电台编排…）就往 `migrate()` 里追加一条
+ * 之后要加表（标签 / 电台编排…）就往 `migrate()` 里追加一条
  * `CREATE TABLE IF NOT EXISTS`。**建表语句只在本文件出现**——一旦别处也写一份，
  * 两处必然漂移（历史上 `logs.db` 与 `eval.db` 的双份表定义就是这么来的）。
  */
@@ -166,6 +187,42 @@ function migrate(db: DatabaseSync): void {
 			tags       TEXT NOT NULL,
 			source     TEXT NOT NULL,
 			updated_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS favorites (
+			track_id   TEXT PRIMARY KEY,
+			created_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS hidden (
+			track_id   TEXT PRIMARY KEY,
+			created_at TEXT NOT NULL
+		);
+
+		-- ── 歌单（2026-09-28 加）：两张表，**不是**「一张表 + 一个存 id 数组的列」──
+		-- 用 JSON 列存曲目会把「删掉一首」变成整列重写 = 整表替换，而整表替换
+		-- 正是「模型把自己看得见的那一页当成全部」的入口（见 contract/playlist.ts）。
+		-- ⚠️ 这段是 **SQL**：注释必须用两个连字符，写双斜杠会在建库时直接语法错误
+		-- （不是"注释没生效"，是整库起不来 —— 单测第一个 hook 就会红）。
+		-- ⚠️ 它也仍在模板字符串里：**注释里不许出现反引号**（会提前终结字符串，
+		-- 而报出来的错会指向一个毫不相干的位置 —— 这条注释自己就踩过一次）。
+		CREATE TABLE IF NOT EXISTS playlists (
+			id         TEXT PRIMARY KEY,
+			name       TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS playlist_items (
+			playlist_id TEXT NOT NULL,
+			track_id    TEXT NOT NULL,
+			-- 顺序 = 插入顺序（自增），不是"排序后的位置"。理由与 Song.id 那条同源：
+			-- 位置型标识会随增删改名平移，而这里的顺序只想表达「加的顺序」。
+			-- ⚠️ 这段同样是 SQL（两个连字符才是注释），且仍在模板字符串里：
+			-- **注释里不许出现反引号**（会提前终结字符串，报成一个毫不相干的语法错）。
+			position   INTEGER NOT NULL,
+			added_at   TEXT NOT NULL,
+			PRIMARY KEY (playlist_id, track_id)
 		);
 
 		CREATE TABLE IF NOT EXISTS agent_turns (

@@ -89,6 +89,9 @@ export const PATCHES = {
 - 「下一首 / 暂停 / 继续」：直接调对应工具，不用先搜。
 - 「跳到第几首 / 回到第一首」：用 jump_in_queue，位置**从 1 开始**，编号就是上面队列列表
   里的编号。说的是**曲名**才走 search_library + play_track 那两步。
+- 「这首别放了 / 把刚才那首从队列里去掉」：用 remove_from_queue，trackId 先 search_library 拿到。
+  **不要拿 build_queue 代替** —— 它是换掉整队；用户说的是"去掉一首"，用换批去实现会把他原来
+  那一批也带走，而这一步不会报错。去掉的正好是正在放的那首时**播放不会停**，会接着往下走。
 - 「大声点 / 小声点 / 太吵了 / 静音」：用 set_volume。**先看下面【当前状态】里的音量**，
   在它基础上改（现在 80% 说「小声点」，40-50 是合理的）。答话时把新的音量说出来。
 - 「单曲循环 / 列表循环 / 顺序播放 / 随机播放 / 别随机了」：用 set_playback_mode。
@@ -99,6 +102,10 @@ export const PATCHES = {
 - 用户问「我最近听了什么」「昨天放的是什么」：用 recent_plays 查，不要凭记忆答。
 - 用户问「都有哪些风格」「你能按什么标签筛」：用 list_tags。给某首歌定新标签之前也先看它
   一眼——库里已有的用词优先复用，别造同义词（pop / 流行 / 华语流行 各记一套，检索就散了）。
+- **搜不到 ≠ 没有这首歌**：曲库是扫出来的，用户刚丢进目录的歌要 rescan_library 重扫一次
+  才可见。用户说「我加了新歌」「怎么搜不到我刚下的那首」→ 先重扫再搜，别直接说"库里没有"。
+- 要按歌手 / 专辑 / 风格挑歌，先 list_library_groups 看一眼库里**实际有哪些名字**，
+  别凭印象猜（猜错就变成"搜不到"，然后你会去告诉用户一首他根本没有的歌不存在）。
 - 用户表达长期口味（「我不喜欢摇滚」「晚上别放吵的」）：用 remember_preference 记一条，
   同时照常把这次的播放需求做完（两件事都要做，不要只顾记账）。
 - 用户纠正某首歌的风格（「这首不是摇滚」「奢香夫人是民族风」）：用 set_track_tags，并说清
@@ -207,11 +214,17 @@ function queueLines(snapshot: PlayerSnapshot): string {
 	// queueIndex 是 0 基，展示一律 +1；-1 表示"队列在、但没在放"（播完停止的样子）
 	const current = queueIndex >= 0 ? queueIndex : -1;
 	// 队列**从哪来**要写出来（2026-09-17 起队列不再恒等于整库）：`'custom'` 是
-	// agent 按条件挑的一批，用户问「怎么就这么几首」时模型得答得上来；
-	// `'library'` 是默认形态，不必啰嗦。
+	// 不跟着曲库变的一批。有名字的是 agent 按条件挑的（`build_queue`）；**没名字的是
+	// 用户自己改过的**（从整库队列里去掉过歌，服务端就地提升成 custom，见 `removeFromQueue`）。
+	// 两种都要说：前者答"怎么就这么几首"，后者答"为什么新加的歌没进来" —— 而后者
+	// 恰恰是**没有任何名字可依托**的那一种，不写出来模型就只能看着一个普通的队列数目。
+	// ⚠️ 与 `components/queue-view.ts` 的 `queueFootNote`（说给**用户**的同一件事）是双胞胎：
+	// 那一个是浏览器里的常驻脚注，这一行是模型每轮看到的处境——两处措辞要一起改。
 	const source =
-		snapshot.queueSource === 'custom' && snapshot.queueLabel
-			? `（按「${snapshot.queueLabel}」挑的一批）`
+		snapshot.queueSource === 'custom'
+			? snapshot.queueLabel
+				? `（按「${snapshot.queueLabel}」挑的一批）`
+				: '（你改过的一批，不跟着曲库变）'
 			: '';
 	const head = `- 队列：共 ${queueSize} 首${source}${current >= 0 ? `，当前第 ${current + 1} 首` : ''}`;
 

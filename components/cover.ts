@@ -32,3 +32,19 @@ export function gradientFor(id: string): string {
 export function coverUrl(id: string): string {
 	return `/api/library/cover?trackId=${encodeURIComponent(id)}`;
 }
+
+/**
+ * 伴生视频端点 URL，给 `<video src>` 直接用（见 `app/api/library/video/route.ts`）。
+ *
+ * 与 `coverUrl` 逐条同理（整串编码）。一处**不同**：封面缺失是常态（服务端 404
+ * 是个正常分支，前端据此回落渐变），而**没有伴生视频时前端根本不该发这次请求**
+ * —— 那件事由快照里的 `hasVideo` 提前说清（见 `contract/player.ts`）。
+ * 也就是说这个函数只在 `hasVideo === true` 的分支里被调用；为 false 时服务端
+ * 会 404，那是"没配"而不是"配错了"。
+ *
+ * 与 `coverUrl` 一样**不带任何查询参数以外的信息**：视频路径不进 URL，
+ * 服务端自己从曲库里查 `song.videoPath`（前端不该知道盘上的相对路径）。
+ */
+export function videoUrl(id: string): string {
+	return `/api/library/video?trackId=${encodeURIComponent(id)}`;
+}

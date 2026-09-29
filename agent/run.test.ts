@@ -1,7 +1,8 @@
 /**
- * `agent/run.ts` 的三个纯函数单测 —— 它们都是「只观察 / 只判定，不参与循环」的
+ * `agent/run.ts` 的四个纯函数单测 —— 它们都是「只观察 / 只判定，不参与循环」的
  * 东西：`firstTextChunk`（⑨ 的首字延迟取数点）、`overBudget`（成本闸门）、
- * `toolCallPruningFor`（审批续跑那一轮该用哪一档裁剪）。
+ * `toolCallPruningFor`（审批续跑那一轮该用哪一档裁剪）、`tagEditApproval`
+ * （改标签要不要先问一句）。
  *
  * ── firstTextChunk：为什么单独测这个看起来"只有三行"的函数 ──────────
  *
@@ -28,11 +29,22 @@
  *      （比如哪天 SDK 改了裁剪实现，用例照样绿，而 bug 已经回来）。
  *   ②的输入不手工摆：先过一遍真实的 `convertToModelMessages`，让 SDK 自己产出
  *      `tool-call` / `tool-approval-request` / `tool-approval-response` 的布局。
+ *
+ * ── tagEditApproval：为什么它必须导出，且**否定分支才是重点** ──────────
+ * 它决定的是**确认闸门装在哪一半上**：`set_track_tags` 一手里既有无害的"加"、
+ * 又有删用户判断的"删"。判错档的两种症状**方向相反、都不报错**：
+ *   - 该问的不问（`remove` 里有词却返回 not-applicable）→ 用户的东西被删掉，
+ *     而他连"这里本来要问一声"都不知道；
+ *   - 不该问的问了（纯 add 也返回 user-approval）→ 每次加标签都弹一个框，
+ *     人被训练成见框就点，闸门**等于失效**。
+ * 所以否定分支（`{}` / 纯 add / **空白 remove**）与肯定分支都要各钉一条。
+ * ⚠️ 最后那条最容易漏：`'   '` 走 `normalizeTags` 是空数组，而写成
+ * `if (!input.remove)` 会把一个空白串判成"要删" —— 凭空弹一个框。
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { convertToModelMessages, pruneMessages, type UIMessage } from 'ai';
-import { firstTextChunk, overBudget, toolCallPruningFor } from './run';
+import { firstTextChunk, overBudget, tagEditApproval, toolCallPruningFor } from './run';
 
 /** 只关心 `chunk.type` 与 `chunk.text`，所以事件按**结构**造，不引 SDK 的联合类型。 */
 const ev = (type: string, text?: string) => ({ chunk: { type, text } });
@@ -255,4 +267,46 @@ test('⚠️ 形状：`before-last-message` 真会把 tool-call 剪掉而审批�
 	// ② 这一轮的档位必须恰好是 `none`，且接了它之后配对完整 —— 把两半接起来才叫回归。
 	assert.equal(toolCallPruningFor(uiMessages), 'none');
 	assert.equal(orphanApprovals(toolCallPruningFor(uiMessages)).length, 0, '本轮档位下配对必须完整');
+});
+
+// ── tagEditApproval：闸门只装在"删"那一半上 ──────────────────────────────
+
+/** 断言它落在"要问"那一档，并把类型收窄（`assert.notEqual` 不会收窄）。 */
+function asked(a: ReturnType<typeof tagEditApproval>) {
+	assert.ok(a !== 'not-applicable', '这一步本该弹确认框');
+	return a;
+}
+
+test('tagEditApproval：什么都没给时不拦', () => {
+	assert.equal(tagEditApproval({}), 'not-applicable');
+});
+
+test('tagEditApproval：纯 add 不拦（加标签无害，拦它会把用户训练成见框就点）', () => {
+	assert.equal(tagEditApproval({ add: '民谣' }), 'not-applicable');
+});
+
+test('tagEditApproval：空白 / 只有分隔符的 remove 不算"说了要删"', () => {
+	// `normalizeTags('   ')` → `[]`。写成 `if (!input.remove)` 会在这里判错：
+	// 凭空弹一个框，而 `execute` 那一趟本来就只会回一句「没有变化」。
+	assert.equal(tagEditApproval({ remove: '   ' }), 'not-applicable');
+	assert.equal(tagEditApproval({ remove: ',,、  ' }), 'not-applicable');
+});
+
+test('tagEditApproval：带 remove 就要问，且 reason 点名要去掉哪个词', () => {
+	const a = asked(tagEditApproval({ remove: '摇滚' }));
+	assert.equal(a.type, 'user-approval');
+	assert.match(a.reason, /摇滚/, '只说"确认吗"等于没说 —— 用户要知道删的是哪几个词');
+});
+
+test('tagEditApproval：add 与 remove 同时给时，reason 把两件事都说了', () => {
+	const a = asked(tagEditApproval({ add: '民谣', remove: '摇滚' }));
+	assert.match(a.reason, /去掉/);
+	assert.match(a.reason, /加上/);
+});
+
+test('tagEditApproval：拆词与存储侧同一条规则（复用 normalizeTags，不自己 split）', () => {
+	// 多词写法要能被识别成"确实要删东西"，且逐个点名 —— 与
+	// `contract/track-tags.ts` 的 `normalizeTags` 同源（自己写一遍 split 会漂移）。
+	const a = asked(tagEditApproval({ remove: '民谣,抒情 摇滚' }));
+	for (const w of ['民谣', '抒情', '摇滚']) assert.match(a.reason, new RegExp(w));
 });

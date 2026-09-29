@@ -26,7 +26,13 @@ export const LS_KEYS = {
 	theme: lsKey('song-theme-v1'),
 	/** 音量 0–1。 */
 	volume: lsKey('music-volume'),
-	/** 收藏曲目 id 列表。 */
+	/**
+	 * 收藏曲目 id 列表 —— **只用于一次性迁移**（2026-09-28 起真相在服务端）。
+	 *
+	 * 老版本把收藏存在这里；`flag-client.ts` 的 `migrateFavoritesFromStorage()`
+	 * 读一次、并进服务端、成功后删掉这个键。**不要**再往里写新数据：
+	 * 收藏是「人的偏好」，本机存一份就等于 agent 永远看不见它。
+	 */
 	favorites: lsKey('music-favorites'),
 	/** 循环模式 seq / rpt / one。 */
 	mode: lsKey('music-playback-mode'),

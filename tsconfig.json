@@ -25,6 +25,8 @@
   // 显式列举而非 `**/*`：工作区里还有 gitignore 的第三方源码目录（vendored 框架等），
   // 用通配符会把它们卷进类型检查。新增顶层目录时记得在这里补一条。
   "include": [
+    "*.ts",
+    "*.mjs",
     "next-env.d.ts",
     "next.config.ts",
     "agent/**/*.ts",
@@ -35,6 +37,7 @@
     "components/**/*.tsx",
     "contract/**/*.ts",
     "scripts/**/*.mts",
+    "scripts/**/*.mjs",
     "server/**/*.ts",
     ".next/types/**/*.ts",
     ".next/dev/types/**/*.ts"

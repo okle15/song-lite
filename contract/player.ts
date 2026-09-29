@@ -55,9 +55,10 @@ export type QueueSource = 'library' | 'custom';
 export type PlayerSnapshot = {
 	state: 'stopped' | 'playing' | 'paused';
 	/**
-	 * 当前曲目。`hasCover` 是唯一一个「不是给人读的」字段：前端拿它决定
-	 * 「试不试真实封面」，缺了就只能盲发一次注定 404 的请求
-	 * （见 `components/TrackCover.tsx`）。带上传送量是一个布尔，可以忽略。
+	 * 当前曲目。`hasCover` 与 `hasVideo` 是仅有的两个「不是给人读的」字段：
+	 * 前端拿 `hasCover` 决定「试不试真实封面」，拿 `hasVideo` 决定「要不要出现
+	 * 视频面」（见 `components/TrackCover.tsx` / `components/TrackVideo.tsx`）。
+	 * 缺了就只能盲发一次注定 404 的请求。带上传送量是一个布尔，可以忽略。
 	 */
 	currentTrack: {
 		id: string;
@@ -65,6 +66,8 @@ export type PlayerSnapshot = {
 		artist: string;
 		album: string;
 		hasCover: boolean;
+		/** 有没有同名的伴生视频（`X.mp4` 配 `X.mp3`）。见 `server/library/video.ts`。 */
+		hasVideo: boolean;
 	} | null;
 	positionSec: number;
 	queueSize: number;
@@ -94,4 +97,30 @@ export type PlayerSnapshot = {
 	mode: PlaybackMode;
 	/** 随机开关（独立于循环模式）。 */
 	shuffle: boolean;
+	/**
+	 * 收藏的 trackId 列表（2026-09-28 加）。
+	 *
+	 * ⚠️ **它和上面那几个不一样：这里没有「设备侧真相」这回事** ——
+	 * 收藏与屏蔽都是**人的偏好**，真相就在服务端（`favorites` 表，见
+	 * `contract/library-flags.ts` 文件头）。进快照的唯一理由是**推送给所有客户端**：
+	 * agent 通过工具收藏一首歌之后，播放条上的 ❤、全屏歌词上的 ❤、曲库抽屉里的
+	 * 「收藏」视图必须**同时**变，而它们分散在三个组件里 —— 靠各自去问一次
+	 * 必然出现"有的变了有的没变"，且**不报错**。
+	 *
+	 * 为什么不让前端各自去 `GET /api/library/favorites`：同一条信息有两个来源，
+	 * 迟早不一致。这里只有一条路：**写 → 服务端 → 广播 → 谁在听谁跟上**，
+	 * 与 `queue` / `volume` 走的是同一条路、同一个频道。
+	 * （新增快照字段的归类规则见 `server/player/prompt-snapshot.ts`：
+	 * 只有写进 `deviceOwned()` 的返回类型才算设备侧，其余默认归服务端 ——
+	 * 这一项归服务端，所以浏览器**改不动**它。）
+	 */
+	favoriteIds: string[];
+	/**
+	 * 被屏蔽的 trackId 列表。与 `favoriteIds` 同一条路、同一个理由。
+	 *
+	 * 它进快照还有一个副作用是好的：曲库抽屉能拿它当**变更信号**
+	 * （列表变过就重取一次带曲名的行），于是「用 id 判新鲜、用接口取详情」
+	 * 两件事各有各的位置，不必再引一个前端状态库。
+	 */
+	hiddenIds: string[];
 };

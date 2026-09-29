@@ -33,6 +33,8 @@
  */
 import { tool } from 'ai';
 import { z } from 'zod';
+import { FLAG_LABEL, type FlagKind } from '../contract/library-flags';
+import { GROUP_BY, GROUP_BY_LABEL } from '../contract/library-groups';
 import { PLAYBACK_MODE_LABEL } from '../contract/player';
 import { normalizePreferenceKey, type Preference } from '../contract/preference';
 import { repeatLabel } from '../contract/task';
@@ -124,8 +126,10 @@ function mmss(sec: number): string {
 
 /** 各 BFF 路由返回的 data 形状（只取用得到的字段）。 */
 type SearchData = {
-	/** 命中的**总数**（不受 limit / offset 限制）。 */
+	/** 命中的**总数**（不受 limit / offset 限制）。**不含被屏蔽的**。 */
 	total: number;
+	/** 同一个词还能命中、但已被屏蔽的条数。**必须转告模型**（见 `search_library`）。 */
+	hiddenMatches?: number;
 	songs: {
 		id: string;
 		title: string;
@@ -147,6 +151,20 @@ type QueueData = PlayData & {
 	missing: string[];
 };
 
+/**
+ * 去掉一首的响应。与 `QueueData` 差一个 `missing`，**不复用**：那个字段是
+ * **换一批**才有的概念（整批里有几首已经不在曲库里了），"去掉一首"不存在这个量 ——
+ * 复用时它只会是 `undefined`，而读的人得靠记忆去判断"这里它到底有没有意义"。
+ */
+type QueueRemoveData = {
+	currentTrack: { title: string; artist: string } | null;
+	queueSize: number;
+	/** 0 基；`-1` = 队列在但没在放（与提示词的展示约定一致）。 */
+	queueIndex: number;
+	queueSource: 'library' | 'custom';
+	queueLabel: string | null;
+};
+
 /** `/api/player/settings` 的响应：改完之后的音量与播放方式。 */
 type SettingsData = { volume: number; mode: 'seq' | 'rpt' | 'one'; shuffle: boolean };
 
@@ -162,6 +180,65 @@ type TagListData = { tags: TagRow[] };
 
 /** `/api/library/tags?trackId=` 的单条响应：没有标签时 `tag` 为 null。 */
 type SingleTagData = { tag: TagRow | null };
+
+/**
+ * `/api/library/{favorites,hidden}` 的响应行。
+ *
+ * ⚠️ 与上面几个类型同一个纪律：**在 agent 侧重新声明**，不 import
+ * `server/` 或 `contract/` 的实现。工具是 HTTP 客户端，它该认的是**响应体**。
+ * （这里只取了用得上的四个字段 —— 将来 BFF 多给一个字段不该逼这里改。）
+ */
+type FlagRow = {
+	trackId: string;
+	title: string;
+	artist: string;
+	/** 文件已不在曲库里（改名 / 移走）。**照旧要念给用户听**，见下方 `flagListText`。 */
+	missing?: boolean;
+};
+
+type FlagData = { rows?: FlagRow[]; changed?: boolean };
+
+/* ── 歌单用的两个形状（同上：只取用得上的字段）────────────────────── */
+type PlaylistSummaryData = { id: string; name: string; count: number };
+type PlaylistOneData = { playlist?: PlaylistSummaryData };
+type PlaylistListData = { playlists?: PlaylistSummaryData[] };
+
+/* ── 曲库运维 + 分组用的形状（同上：只取用得上的字段）────────────────
+ *
+ * `inspect` 一条路由两种粒度，所以这里是**联合类型**而不是交叉类型：
+ * 两个形状里 `hidden` 一个是数字（"屏蔽了几首"）、一个是布尔（"这首被屏蔽了吗"），
+ * 交叉会被 TypeScript 化简成 `never`。判据靠 `'song' in d` —— 单曲那一半
+ * 才有 `song`，整库那一半才有 `total`。
+ */
+type InspectData = LibraryReportData | TrackReportData;
+
+/* ── 曲库运维 + 分组用的三个形状（同上：只取用得上的字段）──────────── */
+type RescanData = {
+	/** null = 这次之前没扫过（**不知道**，不是 0）。 */
+	previousTotal: number | null;
+	total: number;
+	ms: number;
+};
+type GroupsData = { by: string; total: number; groups?: { key: string; label: string; count: number }[] };
+type LibraryReportData = {
+	total: number;
+	hidden: number;
+	artistCount: number;
+	albumCount: number;
+	withoutTags: number;
+	unknownArtist: number;
+	untaggedIds?: string[];
+};
+type TrackReportData = {
+	song?: { title: string; artist: string; album: string };
+	tags?: string[];
+	tagSource?: 'ai' | 'user' | null;
+	favorite?: boolean;
+	hidden?: boolean;
+	/** null = 读不出来（不是 0 次）。 */
+	playCount?: number | null;
+	lastPlayedAt?: string | null;
+};
 
 /* ── ⑩ 触发器用的三个形状 ────────────────────────────────────────
  *
@@ -230,6 +307,48 @@ export function formatPlayTime(iso: string, now: Date = new Date()): string {
 }
 
 /**
+ * 把一份标记清单念给模型听（`list_favorites` / `list_hidden` 共用）。
+ *
+ * 导出是给单测用的（与 `formatPlayTime` / `summarizeTags` 同一理由）：
+ * 这里的错都是**静默**的 —— 少念一个 id，模型下一轮就拿不到它去操作，
+ * 而对话照样通顺。
+ *
+ * 两条不能省的写法：
+ *  1. **id 必须念出来**。`trackId` 是模型唯一能用来调
+ *     `set_favorite` / `set_hidden` 的东西（曲名不是标识，会撞）。
+ *     漏了它，清单就只是"给人看的"，模型看得见却动不了 —— 而那正是
+ *     「解封出口不许减」这条红线的落点。
+ *  2. **失效项要标出来**（`missing`）。收藏过一首后来改名的歌会变成一行失效
+ *     标记；不标的话，模型会照着那个已经不存在的 id 去操作，然后 404。
+ */
+export function flagListText(rows: readonly FlagRow[], kind: FlagKind): string {
+	if (rows.length === 0) {
+		return kind === 'favorite' ? '还没有收藏任何曲目。' : '还没有屏蔽任何曲目。';
+	}
+	const head = kind === 'favorite' ? `已收藏 ${rows.length} 首` : `已屏蔽 ${rows.length} 首`;
+	const lines = rows.map(
+		(r, i) =>
+			`${i + 1}. ${r.title}${r.artist ? ` — ${r.artist}` : ''}` +
+			`${r.missing ? '（**文件已不在曲库里**，可能需要清理）' : ''}（id=${r.trackId}）`,
+	);
+	return `${head}：\n${lines.join('\n')}`;
+}
+
+/**
+ * 把歌单清单念给模型听。**id 必须念出来** —— 它是模型下一步「往里加歌 /
+ * 放这份歌单」唯一能用的东西（名字会撞，两份「跑步」完全合法）。
+ *
+ * `count` 也要带上：「哪份是空的」决定了模型该说「放这份」还是「先往里加点东西」。
+ */
+export function playlistListText(rows: readonly PlaylistSummaryData[]): string {
+	if (rows.length === 0) return '还没有建过歌单。';
+	const lines = rows.map(
+		(p, i) => `${i + 1}. ${p.name}（${p.count} 首，id=${p.id}）`,
+	);
+	return `共 ${rows.length} 份歌单：\n${lines.join('\n')}`;
+}
+
+/**
  * `repeatLabel`（`每天` / `每周一三五`）移到 `contract/task.ts` 了 —— 它如今有两个
  * 读法：模型在返回值里念回去的、卡片上显示给用户看的，**必须同源**。
  * 这里只留 `WEEKDAYS`：它是 `formatAbsolute` 的（绝对时间锚，与任务无关）。
@@ -270,6 +389,24 @@ export function summarizeTags(rows: TagRow[]): { tag: string; count: number; use
 		}
 	}
 	return [...byTag.values()].sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+}
+
+/**
+ * 「这次真的改了没有」→ 一句可以说的话。
+ *
+ * `changed: false` 表示**本来就是这个状态**（用户连点两次、两个入口各点一次）。
+ * 那**不是失败**，但也不能说成「已收藏」—— 那是在报告一件没有发生的事，
+ * 而用户下一步就会去核对（"我什么时候收藏的？"）。与之对称的另一半在
+ * `set_track_tags` 里：「标签没有变化」要单独说，而不是回一句「已更新」。
+ */
+function changedText(
+	data: FlagData | undefined,
+	on: boolean,
+	done: string,
+	undone: string,
+): string {
+	const target = on ? done : undone;
+	return data?.changed === false ? `本来就是这个状态（${target}），没有改动` : target;
 }
 
 /**
@@ -363,15 +500,27 @@ export function createTools(ctx: ToolRunContext) {
 
 					const total = r.data?.total ?? 0;
 					const songs = r.data?.songs ?? [];
+					// 「0 命中」有**两种**，说成一种就是在编假话：库里真没有，以及
+					// 都被用户自己屏蔽了。后者要说出来，否则用户问「那首 XX 呢」会得到
+					// 一句「曲库里没有」——而它明明在，只是他当年亲手屏蔽的。
+					const blocked = r.data?.hiddenMatches ?? 0;
+					const blockedTail = blocked
+						? `（另有 ${blocked} 首也被这个词命中、但已**屏蔽**，可用 list_hidden 查看或 set_hidden 解除）`
+						: '';
 					if (total === 0) {
-						return { ok: true, text: q ? `曲库里没有匹配「${q}」的曲目。` : '曲库是空的。' };
+						return {
+							ok: true,
+							text: q
+								? `曲库里没有匹配「${q}」的曲目。${blockedTail}`
+								: `曲库是空的。${blockedTail}`,
+						};
 					}
 					// 翻过头了：总数不为 0 但这一页是空的。**必须单独说一句**，
 					// 否则模型会拿"命中 N 首"当结论、以为后面就是没有。
 					if (songs.length === 0) {
 						return {
 							ok: true,
-							text: `共命中 ${total} 首，但 offset=${from} 已经翻过头了（只有 ${total} 首）。`,
+							text: `共命中 ${total} 首，但 offset=${from} 已经翻过头了（只有 ${total} 首）。${blockedTail}`,
 						};
 					}
 					// 编号是**在整批里的位置**（含 offset），不是本页内的 1..N ——
@@ -384,7 +533,7 @@ export function createTools(ctx: ToolRunContext) {
 					const tail = rest > 0 ? `；还有 ${rest} 首，用 offset=${from + songs.length} 接着看` : '';
 					return {
 						ok: true,
-						text: `命中 ${total} 首，本页第 ${from + 1}–${from + songs.length} 首：\n${lines.join('\n')}${tail}`,
+						text: `命中 ${total} 首，本页第 ${from + 1}–${from + songs.length} 首：\n${lines.join('\n')}${tail}${blockedTail}`,
 					};
 				}),
 			// 只把 text 交给模型；不写这个，默认会把整个 {ok,text,ms} JSON 发过去。
@@ -435,6 +584,7 @@ export function createTools(ctx: ToolRunContext) {
 				'「来点安静的」「放点摇滚的」「只想听凤凰传奇」，也用于「换个风格」这种整体换口味。' +
 				'query 的匹配规则与 search_library 相同（曲名 / 歌手 / 专辑 / 风格标签）。' +
 				'query 留空 = 恢复成整个曲库（用户说「别只放这几首了」「放回全部」时用它）。' +
+				'`playlistId` = **放一整个歌单**（id 来自 list_playlists）。' +
 				'只放**某一首具体的歌**请用 play_track，不要用本工具。',
 			inputSchema: z.object({
 				query: z
@@ -443,16 +593,59 @@ export function createTools(ctx: ToolRunContext) {
 					.describe(
 						'挑选条件，如风格标签（quiet / rock）、歌手名或关键词。省略或留空表示恢复整个曲库。',
 					),
+				playlistId: z
+					.string()
+					.optional()
+					.describe('放这一整份歌单（id 来自 list_playlists）。给了它就不要再给 query。'),
 				limit: z.number().int().min(1).max(50).optional().describe('这批最多几首，1-50，默认 20。'),
 				label: z
 					.string()
 					.optional()
 					.describe('这批队列的名字，会显示给用户，如「安静的歌」「凤凰传奇」。省略则用 query 原文。'),
 			}),
-			execute: ({ query, limit, label }, { abortSignal }) =>
+			execute: ({ query, playlistId, limit, label }, { abortSignal }) =>
 				settled(async () => {
 					const q = (query ?? '').trim();
 					const n = limit ?? 20;
+
+					// ── 放一整份歌单 ──
+					// 为什么不新开一个 `play_playlist` 工具：「换一批队列并开播」已经是本工具的
+					// 职责，歌单只是**这一批从哪来**的一种。多一个工具就多一处要同步的文案。
+					if (playlistId?.trim()) {
+						const found = await callBff<{ playlist?: { name: string; tracks: { trackId: string; missing?: boolean }[] } }>(
+							ctx,
+							`/api/playlists/items?id=${encodeURIComponent(playlistId.trim())}`,
+							undefined,
+							abortSignal,
+						);
+						if (!found.ok) return { ok: false, text: `读取歌单失败：${found.message}`, kind: found.kind };
+						const p = found.data?.playlist;
+						if (!p) return { ok: false, text: '没有这份歌单（id 可能旧了，用 list_playlists 重查）', kind: 'not_found' };
+						// 空歌单**不能**退化成「恢复整库」——那是把一件事悄悄换成另一件。
+						if (p.tracks.length === 0) {
+							return { ok: false, text: `歌单「${p.name}」是空的，队列没有改动。先往里加几首再放。` };
+						}
+						const gone = p.tracks.filter((t) => t.missing).length;
+						const r = await callBff<QueueData>(
+							ctx,
+							'/api/player/queue',
+							{
+								method: 'POST',
+								headers: JSON_HEADERS,
+								body: JSON.stringify({
+									trackIds: p.tracks.map((t) => t.trackId),
+									label: label ?? `歌单「${p.name}」`,
+								}),
+							},
+							abortSignal,
+						);
+						if (!r.ok) return { ok: false, text: `放歌单失败：${r.message}`, kind: r.kind };
+						const tail = gone > 0 ? `（其中 ${gone} 首已经不在曲库里，会被跳过）` : '';
+						return {
+							ok: true,
+							text: `队列已换成歌单「${p.name}」，共 ${r.data?.queueSize ?? p.tracks.length} 首，从第一首开始放。${tail}`,
+						};
+					}
 
 					// ── 恢复整库：空条件就是「没有条件」这一批（见 queue 路由的文件头）──
 					if (!q) {
@@ -928,6 +1121,99 @@ export function createTools(ctx: ToolRunContext) {
 		}),
 
 		/**
+		 * 从队列里**去掉一首**，其余不变。
+		 *
+		 * 为什么这个工具必须存在（而不是让模型拿 `build_queue` 凑）：`build_queue` 的契约是
+		 * **换掉整队**（它要的是"条件"，不是"这一首不要"），而模型在提示词里只看得到队列的
+		 * **窗口**（`QUEUE_WINDOW = 4`，见 `agent/prompt.ts`）。于是被要求"把这首去掉"时它
+		 * 只有两条路，而**两条都不报错**：
+		 *  1. 用 `build_queue` 换个条件 → 把用户原来那一整批**悄悄换掉**（他要的是"去掉一首"，
+		 *     看到的却是整个队列变了）；
+		 *  2. 试着把剩下的 id 整份发回去重设 → 它手上根本没有整份列表，发出去的必然是残缺的。
+		 * 这与「`set_track_tags` 选 add/remove 而不是整体替换」「`update_playlist` 被标成
+		 * 整表替换危险点」是**同一条判据**：**内容编辑要有"就地编辑"的形状**。
+		 *
+		 * **按 `trackId`、不按位置**（与 `jump_in_queue` 的取舍相反，理由也正相反）：
+		 * 位置是"**某一轮提示词里那一份队列**"里的编号，而队列会被别处改（点播追加 /
+		 * `ensureQueue` / 本轮更早的工具调用），提示词那份随即过期 —— 按下标删最坏是
+		 * **删掉另一首歌而且不报错**（用户只发现歌少了，说不出为什么）；按 id 删最坏是
+		 * 删不到 → 404 → 模型看得见。**位置可以用来"跳"，跳错一首可原谅；用来"删"不可原谅。**
+		 * id 从 `search_library` 拿（它的输出里带 `id=`）。
+		 *
+		 * **404 不算失败**（走 `ok: true`）：路由的 404 语义是"你看到的列表已经旧了"，
+		 * 而不是"这次操作出错了" —— 队列一个字节都没动，与 `cancel_scheduled_task` 把
+		 * "来晚了一步"报成 `cancelled:false` 是同一个处置。判据取 `kind === 'not_found'`
+		 * （`classifyStatus` 只看 status），**不读文案** —— 按文案猜会在 BFF 改一次措辞之后
+		 * 静默失效（同 `turn-log.ts` 按 toolCallId 配对的理由）。
+		 */
+		remove_from_queue: tool({
+			description:
+				'把一首歌从当前播放队列里去掉，队列里其余的**保持不变**。用于「这首别放了」' +
+				'「把刚才那首从队列里去掉」「不想听这首了」这类只针对**一首**的要求。' +
+				'trackId 必须来自 search_library（队列列表里只有曲名，没有 id），先搜一下拿到它再调。' +
+				'如果去掉的正好是**正在放的那一首**，播放会接着往下走而**不是停下来** —— 返回值会告诉你现在放的是哪首。' +
+				'要**换一批**（换风格、换口味）请用 build_queue，它会把整个队列换掉。',
+			inputSchema: z.object({
+				trackId: z.string().min(1).describe('要去掉的曲目 id，来自 search_library 返回值里的 id=…。'),
+			}),
+			execute: ({ trackId }, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<QueueRemoveData>(
+						ctx,
+						'/api/player/queue/remove',
+						{
+							method: 'POST',
+							headers: JSON_HEADERS,
+							body: JSON.stringify({ trackId }),
+						},
+						abortSignal,
+					);
+					if (!r.ok) {
+						// 「队列里没有这一首」= 用户看到的那份列表旧了，不是操作失败：队列**一个字节
+						// 都没动**。报 `ok:true` 是照 `cancel_scheduled_task` 的处置 —— 报成失败
+						// 会推着模型去编一个补救动作，而这里什么都不用做。
+						if (r.kind === 'not_found') {
+							return {
+								ok: true,
+								text:
+									`队列里没有这一首（${r.message}）。队列没有改动 —— 你看到的列表可能已经旧了，` +
+									'先看【当前状态】里的队列，或重新 search_library 确认 id。',
+							};
+						}
+						return { ok: false, text: `从队列里去掉失败：${r.message}`, kind: r.kind };
+					}
+					const size = r.data?.queueSize ?? 0;
+					const cur = r.data?.currentTrack;
+					const idx = r.data?.queueIndex ?? -1;
+					// 去掉正在放的那首时播放**不会停**，而是从同一位置接着往下走 —— 这句要说，
+					// 否则用户以为音乐断了（它只是换了一首，而且是他自己要求的）。
+					const now = cur
+						? `，当前正放第 ${idx + 1} 首：${cur.title} — ${cur.artist}`
+						: size === 0
+							? '，队列空了，播放已停止'
+							: '';
+					// 从**整库**队列里去掉一首，服务端会把这批就地提升为固定的一批
+					// （内容编辑 = 身份编辑，见 `server/player/state.ts` 的 `removeFromQueue`）。
+					// 这是用户能感知的产品事实（它从此不再跟着曲库变），瞒着的话他下次发现
+					// "新加的歌不进队列了"会毫无线索。
+					//
+					// ⚠️ 说成**状态**、不说成一次转变：`removeFromQueue` 对 `library` 是无条件提升的，
+					// 所以去掉之后来源**总是** `custom` —— 响应里分不出"本来就是这个身份"与
+					// "刚刚被提升"。要分就得加一个只被这一处读的响应字段，不划算；
+					// 而"这一批是固定的一批"在两种情形下**都成立**，说状态就没有假话。
+					const fixed =
+						r.data?.queueSource === 'custom'
+							? `\n（这一批是固定的一批，不再跟着曲库变${r.data.queueLabel ? `；当初是按「${r.data.queueLabel}」挑的` : ''}）`
+							: '';
+					return {
+						ok: true,
+						text: `已从队列里去掉一首（id=${trackId}）。队列现在 ${size} 首${now}。${fixed}`,
+					};
+				}),
+			toModelOutput: ({ output }) => modelText(output),
+		}),
+
+		/**
 		 * 标签词表。**不是用来找歌的**（那是 `search_library`）——它回答的是
 		 * 「这个库现在用哪些词在描述风格」，用途有二：
 		 *  1. 用户问「都有哪些风格」时直接答；
@@ -964,7 +1250,409 @@ export function createTools(ctx: ToolRunContext) {
 			toModelOutput: ({ output }) => modelText(output),
 		}),
 
-		/* ── ⑩ 触发器（2026-09-23 加）──────────────────────────────────
+		/* ── 收藏与屏蔽（2026-09-28）────────────────────────────────────
+		 *
+		 * 四个工具的形状完全对称：**收藏 / 看收藏 / 屏蔽 / 看屏蔽**。
+		 *
+		 * 在这之前，「收藏」只活在前端 localStorage 里 —— 服务端与 agent
+		 * 完全看不见它（既答不了「我收藏了哪些」，也没法说「帮你收起来了」）。
+		 * 判据是项目里那条分流规则：**收藏与屏蔽是「人的偏好」，不是「设备的事实」**
+		 * （音量 / 播放方式才是设备的事实）。人的偏好不进服务端，agent 就永远是瞎的。
+		 *
+		 * ⚠️ **屏蔽为什么必须有 `list_hidden` 这个配对工具**（红线③「解封出口不许减」）：
+		 * `search_library` 会过滤掉被屏蔽的歌，于是它**再也不是「拿到 trackId 的那条路」**
+		 * —— 那正是 `set_hidden` 唯一需要的东西。没有 `list_hidden`，模型会把歌屏蔽掉
+		 * 然后**永远没法解除**：它嘴上说着「要解除的话告诉我」，手上却没有任何办法
+		 * 拿到那首歌的 id。这就是「读过滤与写保护必须成对」在工具层的正面形态：
+		 * **过滤掉一个读出口，就必须补上另一个读出口。**
+		 *
+		 * ⚠️ **屏蔽刻意不加确认闸门**（与 `set_track_tags` 的 remove 不同）：
+		 * §2.8 的三条判据里它只满足两条 —— 一旦执行确实「看不出往回走」，
+		 * 但它**完全可逆**（`set_hidden:false`），而且**用户看得见**
+		 * （那首歌从曲库列表里消失了）。第三条判据「撤掉之后用户不知道曾有这么
+		 * 一件事」不成立，所以不该拦。加闸门的代价是真实的：被拦烦了的用户
+		 * 见框就点，闸门本身会失效。
+		 */
+		set_favorite: tool({
+			description:
+				'收藏 / 取消收藏一首歌。用户说「这首不错，收藏一下」「帮我存起来」「这首我挺喜欢」→ favorite=true；' +
+				'「取消收藏」「不喜欢了」→ favorite=false。收藏是**用户的长期偏好**，会一直保留。' +
+				'需要先用 search_library 拿到 trackId；如果是**当前正在放的那首**，也可以直接说它的名字。',
+			inputSchema: z.object({
+				trackId: z.string().min(1).describe('曲目 id，来自 search_library 返回值里的 id=…。'),
+				favorite: z.boolean().describe('true = 收藏，false = 取消收藏。'),
+			}),
+			execute: ({ trackId, favorite }, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<FlagData>(
+						ctx,
+						'/api/library/favorites',
+						{
+							method: 'POST',
+							headers: JSON_HEADERS,
+							body: JSON.stringify({ trackId, favorite }),
+						},
+						abortSignal,
+					);
+					if (!r.ok) return { ok: false, text: `${FLAG_LABEL.favorite.verb}失败：${r.message}`, kind: r.kind };
+					// `changed: false` = 本来就是这个状态（用户连点、或两个入口各点一次）。
+					// **不是失败**，但也不能说成「已收藏」——那样是在报告一件没发生的事。
+					const state = changedText(r.data, favorite, FLAG_LABEL.favorite.done, FLAG_LABEL.favorite.undone);
+					return { ok: true, text: `${state}。当前共收藏 ${r.data?.rows?.length ?? 0} 首。` };
+				}),
+			toModelOutput: ({ output }) => modelText(output),
+		}),
+
+		list_favorites: tool({
+			description:
+				'列出用户收藏过的所有曲目（含 id，可用于播放或取消收藏）。' +
+				'用于「我收藏了哪些歌」「放一首我收藏的」这类请求。要**找歌**请用 search_library。',
+			inputSchema: z.object({}),
+			execute: (_args, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<FlagData>(ctx, '/api/library/favorites', undefined, abortSignal);
+					if (!r.ok) return { ok: false, text: `读取收藏失败：${r.message}`, kind: r.kind };
+					return { ok: true, text: flagListText(r.data?.rows ?? [], 'favorite') };
+				}),
+			toModelOutput: ({ output }) => modelText(output),
+		}),
+
+		set_hidden: tool({
+			description:
+				'屏蔽 / 解除屏蔽一首歌。屏蔽 = 「以后别再自动给我放这首」：它会从曲库列表、检索结果和' +
+				'「整个曲库」队列里消失（文件本身还在，随时可以解除）。' +
+				'用户说「这首以后别放了」「再也不想听到这首」→ hidden=true；' +
+				'「把那首放回来」「解除屏蔽」→ hidden=false。' +
+				'**解除屏蔽前必须先用 list_hidden 拿到 id** —— search_library 已经搜不到被屏蔽的歌了。' +
+				'要**从当前队列里**去掉一首（只是这一批里不想听，不是永远不想听）请用 remove_from_queue。',
+			inputSchema: z.object({
+				trackId: z.string().min(1).describe('曲目 id。屏蔽时来自 search_library；解除时来自 list_hidden。'),
+				hidden: z.boolean().describe('true = 屏蔽，false = 解除屏蔽。'),
+			}),
+			execute: ({ trackId, hidden }, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<FlagData>(
+						ctx,
+						'/api/library/hidden',
+						{
+							method: 'POST',
+							headers: JSON_HEADERS,
+							body: JSON.stringify({ trackId, hidden }),
+						},
+						abortSignal,
+					);
+					if (!r.ok) return { ok: false, text: `${FLAG_LABEL.hidden.verb}失败：${r.message}`, kind: r.kind };
+					const state = changedText(r.data, hidden, FLAG_LABEL.hidden.done, FLAG_LABEL.hidden.undone);
+					// 屏蔽生效的**时机**必须说清：用户以为"这首立刻从队列里没了"，
+					// 而实际上队列要到下一次点播才按新的可见曲库重排（见 hidden 路由文件头）。
+					// 不说的话，他会说「我不是让你别放这首了吗」——而它其实已经在队列里了。
+					const when = hidden
+						? '（当前队列不受影响；下一次点播时整库队列会按新的可见曲库重排，它就不在里面了）'
+						: '';
+					return {
+						ok: true,
+						text: `${state}。当前共屏蔽 ${r.data?.rows?.length ?? 0} 首${when}`,
+					};
+				}),
+			toModelOutput: ({ output }) => modelText(output),
+		}),
+
+		list_hidden: tool({
+			description:
+				'列出被屏蔽的曲目（含 id）。**这是解除屏蔽的唯一入口** —— 被屏蔽的歌在 search_library 里搜不到，' +
+				'所以「把那首放回来」必须先调本工具拿 id，再调 set_hidden 传 hidden=false。' +
+				'用户问「我屏蔽过哪些」也用它。',
+			inputSchema: z.object({}),
+			execute: (_args, { abortSignal }) =>
+				settled(async () => {
+					const r = await callBff<FlagData>(ctx, '/api/library/hidden', undefined, abortSignal);
+					if (!r.ok) return { ok: false, text: `读取屏蔽清单失败：${r.message}`, kind: r.kind };
+					return { ok: true, text: flagListText(r.data?.rows ?? [], 'hidden') };
+				}),
+			toModelOutput: ({ output }) => modelText(output),
+		}),
+
+		/* ── 歌单（2026-09-28 加）────────────────────────────────────────
+	 *
+	 * 四个工具的形状是「建 / 看 / 加 / 减」。**刻意没有「改整份」的那个**：
+	 * 模型只看得到清单的一页，给它一个"写回这一批"的入口，它会把自己看得见的
+	 * 那部分当成全部 —— 用户的歌单被悄悄换走，而两次都不报错（§2.4）。
+	 * 所以加是追加、减是**按 id 删那一项**（不收下标：下标是某一份视图里的位置，
+	 * 视图一变就指到另一首歌）。
+	 *
+	 * 「放这份歌单」不在这里 —— 它走 `build_queue` 的 `playlistId`：
+	 * 换一批队列本来就是它的职责，没必要为「从哪来」再发明一个工具。
+	 */
+	create_playlist: tool({
+		description:
+			'新建一个歌单。用户说「建一个跑步歌单」「存一份睡前听的」「把这批收起来」→ 用本工具。' +
+			'`trackIds` 可选：**给了就是一次导入一批**（来源可以是 search_library 的结果、' +
+			'list_favorites 的收藏、或当前队列）。先建空歌单、之后再往里加也可以。',
+		inputSchema: z.object({
+			name: z.string().min(1).describe('歌单名，如「跑步」「睡前」。'),
+			trackIds: z
+				.array(z.string().min(1))
+				.optional()
+				.describe('可选：一次导入的曲目 id 列表。省略则建一个空歌单。'),
+		}),
+		execute: ({ name, trackIds }, { abortSignal }) =>
+			settled(async () => {
+				const r = await callBff<PlaylistOneData>(
+					ctx,
+					'/api/playlists',
+					{
+						method: 'POST',
+						headers: JSON_HEADERS,
+						body: JSON.stringify(trackIds?.length ? { name, trackIds } : { name }),
+					},
+					abortSignal,
+				);
+				if (!r.ok) return { ok: false, text: `建歌单失败：${r.message}`, kind: r.kind };
+				const p = r.data?.playlist;
+				if (!p) return { ok: false, text: '服务端没有回歌单（歌单可能没建成）', kind: 'unknown' };
+				// id 必须念出来：它是模型下一步往里加歌 / 删歌唯一能用的东西。
+				const withItems = p.count > 0 ? `，已导入 ${p.count} 首` : '（空的）';
+				return { ok: true, text: `已建歌单「${p.name}」${withItems}（id=${p.id}）` };
+			}),
+		toModelOutput: ({ output }) => modelText(output),
+	}),
+
+	list_playlists: tool({
+		description:
+			'列出用户建过的全部歌单（含 id 与每份有几首）。' +
+			'用于「我有哪些歌单」「放我的跑步歌单」（拿到 id 后交给 build_queue 的 playlistId）。' +
+			'要**看某一份里有什么歌**请用 list_playlist_tracks。',
+		inputSchema: z.object({}),
+		execute: (_args, { abortSignal }) =>
+			settled(async () => {
+				const r = await callBff<PlaylistListData>(ctx, '/api/playlists', undefined, abortSignal);
+				if (!r.ok) return { ok: false, text: `读取歌单失败：${r.message}`, kind: r.kind };
+				return { ok: true, text: playlistListText(r.data?.playlists ?? []) };
+			}),
+		toModelOutput: ({ output }) => modelText(output),
+	}),
+
+	add_to_playlist: tool({
+		description:
+			'往歌单里**加**歌（追加，不会动里面已有的那些）。' +
+			'用户说「把这首加到跑步歌单」「这几首都收进去」→ 用本工具。' +
+			'已经在这份里的会跳过（那不是失败）。要从歌单里**去掉**一首请用 remove_from_playlist。',
+		inputSchema: z.object({
+			playlistId: z.string().min(1).describe('歌单 id，来自 list_playlists（不是歌单名）。'),
+			trackIds: z.array(z.string().min(1)).min(1).describe('要加入的曲目 id 列表，可多首。'),
+		}),
+		execute: ({ playlistId, trackIds }, { abortSignal }) =>
+			settled(async () => {
+				const r = await callBff<PlaylistOneData & { added: number; skipped: number }>(
+					ctx,
+					'/api/playlists/items',
+					{
+						method: 'POST',
+						headers: JSON_HEADERS,
+						body: JSON.stringify({ id: playlistId, trackIds }),
+					},
+					abortSignal,
+				);
+				if (!r.ok) return { ok: false, text: `加入歌单失败：${r.message}`, kind: r.kind };
+				const p = r.data?.playlist;
+				if (!p) return { ok: false, text: '服务端没有回歌单', kind: 'unknown' };
+				const added = r.data?.added ?? 0;
+				const skipped = r.data?.skipped ?? 0;
+				const tail = skipped > 0 ? `；有 ${skipped} 首本来就在里面，没有重复加` : '';
+				return {
+					ok: true,
+					text:
+						added === 0
+							? `这几首本来就在「${p.name}」里，没有改动（现在共 ${p.count} 首）${tail}`
+							: `已往「${p.name}」加了 ${added} 首，现在共 ${p.count} 首${tail}`,
+				};
+			}),
+		toModelOutput: ({ output }) => modelText(output),
+	}),
+
+	remove_from_playlist: tool({
+		description:
+			'从歌单里**去掉一首**。用户说「把这首从跑步歌单里删了」「那首别放在里面」→ 用本工具。' +
+			'⚠️ 传 **trackId**（曲目 id），不是第几首 —— 位置会随排序变化，按位置删会删错歌。' +
+			'不知道 id 就先用 list_playlists 找到歌单，再看清单里的 id。',
+		inputSchema: z.object({
+			playlistId: z.string().min(1).describe('歌单 id，来自 list_playlists。'),
+			trackId: z.string().min(1).describe('要去掉的那首的曲目 id。**不是位置**。'),
+		}),
+		execute: ({ playlistId, trackId }, { abortSignal }) =>
+			settled(async () => {
+				const r = await callBff<PlaylistOneData & { removed: boolean }>(
+					ctx,
+					`/api/playlists/items?id=${encodeURIComponent(playlistId)}&trackId=${encodeURIComponent(trackId)}`,
+					{ method: 'DELETE' },
+					abortSignal,
+				);
+				if (!r.ok) return { ok: false, text: `从歌单里去掉失败：${r.message}`, kind: r.kind };
+				const p = r.data?.playlist;
+				if (r.data?.removed === false) {
+					// 不是失败，但也不能说成「已删除」—— 那是在报告一件没发生的事。
+					return {
+						ok: true,
+						text: `「${p?.name ?? '这份歌单'}」里本来就没有这首，没有改动（现在共 ${p?.count ?? 0} 首）。`,
+					};
+				}
+				return { ok: true, text: `已从「${p?.name ?? '歌单'}」去掉这一首，现在共 ${p?.count ?? 0} 首。` };
+			}),
+		toModelOutput: ({ output }) => modelText(output),
+	}),
+
+	/* ── 曲库运维 + 分组视图（2026-09-28 加）────────────────────────────
+	 *
+	 * 三件，每一件对应一个此前**答不上来**的问题：
+	 *
+	 *   ① `rescan_library` —— 「我往目录里加了新歌」。扫描结果在进程内存活期内
+	 *      memo 一次，所以新文件在重启之前**不可见**，而没有任何地方告诉用户。
+	 *   ② `list_library_groups` —— 「我库里都有谁 / 哪些专辑 / 哪些风格」。
+	 *      与 `list_tags` 同形态（词表类工具），没有它模型只能猜名字。
+	 *      分桶**在服务端**：前端只有一页，拿一页分桶会把「本页」说成「全部」。
+	 *   ③ `inspect_library` —— 「这首什么状况 / 我的库缺什么」。
+	 *      单曲那一半把「标签 + 收藏 + 屏蔽 + 播过几次」合成一次调用；
+	 *      整库那一半给出 `untaggedIds`（**打标脚本的真实输入**）。
+	 *
+	 * ⚠️ 清单里的 `organize` 落地成了**只读体检**，不是「把文件挪进子目录」：
+	 * `Song.id` 是相对路径，改名 / 移动 = 新 id = `plays` 与 `track_tags` 全失联
+	 * （改「唯一标识」= 数据迁移），而本机无回收站、删了就真没了。
+	 * 它说清「库里缺什么」，动哪一处由人决定。
+	 */
+	rescan_library: tool({
+		description:
+			'**重新扫描曲库**。用户往音乐目录里加了（或删了、改名了）音频文件之后，' +
+			'说「我加了新歌」「扫一下曲库」「怎么没看到我新下的那首」→ 用本工具。' +
+			'不调它的话，新文件要等服务端重启才可见。',
+		inputSchema: z.object({}),
+		execute: (_args, { abortSignal }) =>
+			settled(async () => {
+				const r = await callBff<RescanData>(
+					ctx,
+					'/api/library/rescan',
+					{ method: 'POST' },
+					abortSignal,
+				);
+				if (!r.ok) return { ok: false, text: `重扫曲库失败：${r.message}`, kind: r.kind };
+				const d = r.data;
+				if (!d) return { ok: false, text: '服务端没有回扫描结果', kind: 'unknown' };
+				// ⚠️ `previousTotal` 为 null = 这次之前没扫过（**不知道**，不是 0）。
+				// 这时只说现在有几首 —— 说「新增了 N 首」是在编一个数字。
+				const delta =
+					d.previousTotal === null
+						? ''
+						: d.total === d.previousTotal
+							? `（和上次一样，还是 ${d.total} 首）`
+							: `（上次 ${d.previousTotal} 首 → 现在 ${d.total} 首）`;
+				return { ok: true, text: `已重扫曲库，现在共 ${d.total} 首${delta}。` };
+			}),
+		toModelOutput: ({ output }) => modelText(output),
+	}),
+
+	list_library_groups: tool({
+		description:
+			'按**歌手 / 专辑 / 风格**列出曲库的分组，以及每个组里有几首歌。' +
+			'用于「我库里都有谁的歌」「都有哪几张专辑」「能按什么风格挑」这类问题 —— ' +
+			'**在按歌手或风格挑歌之前先看一眼这里**，别凭印象猜名字。' +
+			'想直接放某个歌手的歌请用 build_queue（它会自己搜）。',
+		inputSchema: z.object({
+			// ⚠️ **直接拿 `GROUP_BY` 当枚举**，不另抄一份 `['artist','album','tag']`：
+			// 抄一份的话两处会漂移（加维度时只改一处 → 工具收不到新维度、或路由
+			// 拒掉工具认的值），而那种漂移**不报错**（§2.6「跨层清单必须双向相等」）。
+			// 描述里**不写引号括起来的那三个值**：架构守卫靠"一行里同时出现三个
+			// 带引号的维度名"来抓"抄了一份清单"，写进来会把自己送进去。
+			by: z.enum(GROUP_BY).describe('分组维度：artist 歌手 / album 专辑 / tag 风格标签。'),
+		}),
+		execute: ({ by }, { abortSignal }) =>
+			settled(async () => {
+				const r = await callBff<GroupsData>(
+					ctx,
+					`/api/library/groups?by=${encodeURIComponent(by)}`,
+					undefined,
+					abortSignal,
+				);
+				if (!r.ok) return { ok: false, text: `读取分组失败：${r.message}`, kind: r.kind };
+				const groups = r.data?.groups ?? [];
+				if (groups.length === 0) {
+					return { ok: true, text: `曲库里还没有可分组的曲目（共 ${r.data?.total ?? 0} 首）。` };
+				}
+				const body = groups.map((g) => `${g.label}（${g.count} 首）`).join('、');
+				// ⚠️ tag 维度下各组之和会**大于** total（一首多标签进多组）。
+				// 这句话必须说，否则模型会拿各组相加去"校验" total，然后报一个不存在的矛盾。
+				const note =
+					by === 'tag' && groups.length > 1
+						? '\n（一首歌可以有多个标签，所以上面的首数相加会多于总曲目数）'
+						: '';
+				return {
+					ok: true,
+					text: `按${GROUP_BY_LABEL[by]}分 ${groups.length} 组（共 ${r.data?.total ?? 0} 首）：\n${body}${note}`,
+				};
+			}),
+		toModelOutput: ({ output }) => modelText(output),
+	}),
+
+	inspect_library: tool({
+		description:
+			'**曲库体检**：给了 trackId 就报这一首的状况（有什么标签、标签是谁定的、' +
+			'是不是收藏 / 屏蔽了、播过几次），不给就报整个库的状况（几首、几首还没打标、' +
+			'有几个歌手、有几首读不出歌手）。' +
+			'用于「这首我听过吗」「这首是什么风格来着」「我的库里还有哪几首没打标」。' +
+			'⚠️ 只报**事实**，不整理也不修改任何文件。',
+		inputSchema: z.object({
+			trackId: z
+				.string()
+				.min(1)
+				.optional()
+				.describe('可选：曲目 id（来自 search_library）。省略 = 报整个曲库的状况。'),
+		}),
+		execute: ({ trackId }, { abortSignal }) =>
+			settled(async () => {
+				const path = trackId
+					? `/api/library/inspect?trackId=${encodeURIComponent(trackId)}`
+					: '/api/library/inspect';
+				const r = await callBff<InspectData>(ctx, path, undefined, abortSignal);
+				if (!r.ok) return { ok: false, text: `读取曲库信息失败：${r.message}`, kind: r.kind };
+				const d = r.data;
+				if (!d) return { ok: false, text: '服务端没有回曲库信息', kind: 'unknown' };
+
+				if ('song' in d && d.song) {
+					const s = d.song;
+					const tags = d.tags?.length ? d.tags.join('、') : '（还没打标签）';
+					const source = d.tagSource === 'user' ? '这组标签是用户自己定的' : d.tagSource === 'ai' ? '这组标签是 AI 打的' : '';
+					const flags = [d.favorite ? '已收藏' : '', d.hidden ? '已屏蔽' : ''].filter(Boolean);
+					// ⚠️ `playCount` 为 null = 读不出来，**不是** 0 次。说成"没听过"是在编。
+					const plays =
+						d.playCount === null
+							? '播放次数读不出来'
+							: d.playCount === 0
+								? '还没播过'
+								: `播过 ${d.playCount} 次${d.lastPlayedAt ? `，最近一次 ${d.lastPlayedAt.slice(0, 10)}` : ''}`;
+					return {
+						ok: true,
+						text:
+							`《${s.title}》— ${s.artist}（专辑：${s.album}）\n` +
+							`标签：${tags}${source ? `（${source}）` : ''}\n` +
+							`${plays}${flags.length ? `\n${flags.join(' · ')}` : ''}`,
+					};
+				}
+
+				if (!('total' in d)) return { ok: false, text: '服务端回了不认识的体检结果', kind: 'unknown' };
+				const untagged =
+					d.withoutTags === 0
+						? '全部都有标签'
+						: `还有 ${d.withoutTags} 首没打标：${(d.untaggedIds ?? []).join(' / ')}`;
+				return {
+					ok: true,
+					text:
+						`曲库共 ${d.total} 首${d.hidden ? `（另有 ${d.hidden} 首被屏蔽）` : ''}，` +
+						`${d.artistCount} 位歌手 / ${d.albumCount} 张专辑。\n${untagged}` +
+						(d.unknownArtist ? `\n有 ${d.unknownArtist} 首读不出歌手信息。` : ''),
+				};
+			}),
+		toModelOutput: ({ output }) => modelText(output),
+	}),
+
+	/* ── ⑩ 触发器（2026-09-23 加）──────────────────────────────────
 		 *
 		 * 三个工具的形状完全对称：**排 / 看 / 撤**。加它们不是"多了三个功能"，
 		 * 而是补齐了 BLUEPRINT §2 里唯一空着的那个部件 —— 在这之前 agent

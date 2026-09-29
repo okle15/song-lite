@@ -25,14 +25,17 @@ npm run build && npm start -- -p 3100
 ## 功能边界
 
 **有**：曲库浏览与搜索（**含按风格标签搜**、**翻页与总数**：「已显示 12 / 共 20 首」+「加载更多」）、
-点击播放、进度拖动、上下首、播放队列、播放模式（顺序 / 列表循环 / 单曲循环 / 随机）、
+点击播放、进度拖动、上下首、**播放队列（看清楚这一批是什么、去掉一首、退回整个曲库）**、播放模式（顺序 / 列表循环 / 单曲循环 / 随机）、
 **真实封面**（读文件内嵌 `APIC`，无则回落「首字 + 渐变」）、歌词（含全屏沉浸页，
 **优先读文件内嵌 `USLT`**）、音量 / 静音、背景主题、可拖拽可合并的多面板布局（宽屏两列：
 调列宽 / 卡片高度 / 整列内容倍数；窄屏单列：同列卡片之间照常可拖）、全局快捷键、
 **播放历史看得见且可重播**、**曲目风格标签看得见、可改**（两者都在下面单说）。
 
-**没有**（曾有过，2026-09-15 随最简化删除）：电台、偏好设置、语音输入、
-MV 视频播放、统计概览。**AI 打标回来了，但换了形态**：不再依赖不可信的 ID3 `TCON`，
+**没有**（曾有过，2026-09-15 随最简化删除）：电台、偏好设置、统计概览。
+⚠️ **两样回来了，但都不是原来那个形状**：**语音输入**（2026-09-28）—— 走服务端转写、
+结果只进输入框不自动发送，见下；**视频播放**（2026-09-28）—— 只做**歌曲的伴生视频**
+（同名的 `X.mp4`），不做「MV 搜索 / 独立视频源」，见下。
+**AI 打标回来了，但换了形态**：不再依赖不可信的 ID3 `TCON`，
 改由 `track_tags` 表承载（AI 打底 + 用户覆盖）——重跑打标**不会覆盖用户手改过的标签**。
 **「记忆」卡（2026-09-24）不是"偏好设置"回来了** —— 两者判据不同：那张被删的表单问的是
 「用户想配置什么」，这张卡问的是「**AI 已经记下了什么、能不能撤**」。它是 ⑥ 的**读侧**，
@@ -48,6 +51,52 @@ MV 视频播放、统计概览。**AI 打标回来了，但换了形态**：不�
 而不是笼统的「重播失败」。⚠️ 它**不是**推送：数据是 GET 现取的，切到这张卡时才重取一次
 （同一首歌原地重播不改变刷新信号，所以那一次会少一条最新记录，直到下次切歌）。
 
+**收藏与屏蔽（2026-09-28）**：两件事都是「**人的偏好**」，所以真相在服务端（`favorites` /
+`hidden` 两张表，判据见 `contract/library-flags.ts`）—— 收藏从前存在 `localStorage`，
+于是服务端与 agent **完全看不见它**（既答不了「我收藏了哪些」，也没法说「帮你收起来了」）。
+现在：读写都走 `/api/library/{favorites,hidden}`，界面一律从 SSE 快照的 `favoriteIds` /
+`hiddenIds` 渲染，**本机一份不留**，所以 agent 收藏一首歌之后播放条上的 ❤、全屏歌词上的 ❤、
+曲库抽屉里的「收藏」视图**同时**变。屏蔽的过滤点只有 `server/library/visible.ts` 一处
+（曲库有六七个出口，漏一个就是「被屏蔽的歌从那条路回来了」，而队列里多一首**看不出来**）；
+它**不是一把锁** —— 拿着 id 点名要放仍然放得出来，否则被屏蔽的歌就再也拿不到 id、
+解封入口随之消失。解封出口有两个：`list_hidden` 工具与曲库抽屉的「已屏蔽」视图。
+
+**歌单（2026-09-28）**：两张表 `playlists`（一份歌单一行）+ `playlist_items`（里面的一首一行），
+id 是**生成的不透明 id**（`randomUUID`）—— 名字不是标识，若拿名字当主键，改名就变成一次
+数据迁移（参见「改唯一标识」那条）。写入刻意**没有「整表替换」入口**：加歌是**追加**
+（`POST /api/playlists/items`，同曲幂等、回 `added` / `skipped`），删歌是**按 `trackId` 删一行**
+（`DELETE ?id=&trackId=`，`app/api/playlists` 上根本没有 PUT / PATCH）—— 因为模型只看得到
+队列的**窗口**，给它一个「整份覆盖」的接口，它会把用户原来那一批悄悄换走，而且不报错。
+建歌单时可以直接带 `trackIds`（**导入**）：界面上的「存当前队列」与 agent 的 `create_playlist`
+都走这条路。`build_queue` 多了 `playlistId` 参数，直接放一整份歌单。
+
+**曲库运维 + 分组（2026-09-28）**：三件事，各自补一个此前答不上来的问题 ——
+① **重扫**（`POST /api/library/rescan`）：扫描结果在进程存活期内 memo 一次，所以新丢进
+目录的歌在重启之前**不可见**，而没有任何地方告诉用户。② **分组浏览**
+（`GET /api/library/groups?by=artist|album|tag`）：分桶**在服务端做** —— 前端只有一页
+（limit 12/50），拿它分桶得到的是「这一页里有哪几个歌手」，说出来却是「按歌手（N 组）」，
+即**把「本页」说成「全部」**；同理**分组态下搜索框禁用**（搜索是平铺的一页，分组是整库的
+全部分桶，两者同时生效时每个数字都在撒谎）。点开一个组看成员也走服务端
+（`?by=&key=`），不用「拿组名去搜」代替—— 搜索是子串匹配，会把组外的歌放进来。
+③ **体检**（`GET /api/library/inspect`，带 `?trackId=` 则是单曲详情）：它给出
+`untaggedIds`（还没打标的曲目 id），那是 `npm run tag:library` 的真实输入。
+⚠️ 清单里的 `organize` 落地成了**只读体检**而不是「把文件挪进子目录」：`Song.id` 是相对
+路径，改名 / 移动 = **新 id** = `plays` 与 `track_tags` 全失联（改「唯一标识」= 数据迁移），
+而本机没有回收站。这条已写成断言（`architecture.test.ts`）。
+
+**伴生视频（2026-09-28）**：曲库里和 `X.mp3` **同名同目录**的 `X.mp4` 就是这首歌的视频。
+它**不是第二条曲目**——不进队列、不单独记 `plays`、**不参与 `Song.id`**（id 仍是音频的相对
+路径），所以给一首歌加 / 删视频文件**不是一次数据迁移**（`plays` / `track_tags` 一行不动）。
+配对只按「同名同目录」且扩展名有**优先顺序**（`.mp4` → `.m4v` → `.webm` → `.mkv` → `.mov`，
+在 `server/library/video.ts`）：`readdir` 的顺序在不同文件系统上不一样，任选一个会让「今天放
+mp4、明天放 mkv」，而那种抖动会被读成「数据坏了」。**不做模糊匹配**——猜错的话用户看到的是
+另一首歌的画面，而且不报错，宁可配不上。
+界面上它是**歌曲的一个表面**：正在播放卡那块 128px 封面位换成 `<video>`（与封面共用同一套
+尺寸），全屏沉浸页多一颗「歌词 / 视频」开关。画面**不拥有播放**——永远静音、不给原生
+`controls`、位置跟着 `player-time` 走（偏差超过 0.35s 才硬拉一次），声音始终来自 APlayer；
+这三条都写成了断言。快照与曲库接口只带一个布尔 `hasVideo`（与 `hasCover` 同一条：URL 由前端
+按 id 拼），所以没有视频的曲目**一次网络请求都不会发生**。
+
 **曲库抽屉里的标签（2026-09-28）**：每首歌下面一行标签 chip —— **常驻显示，不做 hover 才出现**
 （触摸屏上根本没有 hover），点它打开底部的编辑条。编辑条会**先说清这组是谁写的**：
 「现在这组是 AI 打的（你改了就以你为准）」/「现在这组是你定过的（AI 打标不会再覆盖它）」
@@ -56,15 +105,20 @@ MV 视频播放、统计概览。**AI 打标回来了，但换了形态**：不�
 保存后显示的用**服务端回来的那一份**（拆词 / 排序 / 大小写在服务端归一化）。
 
 **Agent**：对话是布局系统里的一张普通卡（`chat`，⌘K 唤起），协议交给 Vercel AI SDK
-（`/api/agent`）。当前有 **17 个工具**（数的是 `createTools` 的注册表键，全部外置，没有内联工具）：
+（`/api/agent`）。当前有 **29 个工具**（数的是 `createTools` 的注册表键，全部外置，没有内联工具）：
 检索与播放 3 个（检索 / 播放单曲 / **按条件换一批队列**）、
-播放控制 4 个（下一首 / 暂停 / 继续 / 按位置跳转）、**播放设置 2 个**（音量 / 播放方式）、
+播放与队列控制 5 个（下一首 / 暂停 / 继续 / 按位置跳转 / **从队列里去掉一首**）、
+**播放设置 2 个**（音量 / 播放方式）、
 认知写入 3 个（记住 / 忘掉偏好、增删曲目标签）、只读回顾 2 个（播放历史、标签一览）、
+**收藏与屏蔽 4 个**（收藏 / 看收藏 / 屏蔽 / 看屏蔽清单）、
+**歌单 4 个**（建 / 看 / 加歌 / 去歌，见下）、
+**曲库运维与分组 3 个**（重扫 / 分组浏览 / 体检，见下）、
 **排期 3 个**（排 / 看 / 撤，见 ⑩）。
 另有**会话历史**（跨刷新保留，发送前裁掉历史轮的工具轨迹）与**记忆**（长期偏好跨对话注入
 系统提示词，**并在「记忆」卡上列出来、可逐条撤回** —— 见下面「没有」那段里
 「为什么这不是偏好设置回来了」的辨析）。系统提示词的实时状态块里带着**队列窗口**（当前附近几首 + 「前 / 后 N 首略」，
-自定义队列还会写明「按什么挑的一批」）、**当前音量与播放方式**、以及**现在的时刻**——
+自定义队列还会写明「按什么挑的一批」，用户自己改过的那种写「你改过的一批」）、
+**当前音量与播放方式**、以及**现在的时刻**——
 `jump_in_queue` 的「第几首」、`set_volume` 的「小声点」都照它数/算，而 `schedule_task`
 要的绝对时间由模型自己算（所以它看得到「现在」，且工具会把服务端规范化后的时间念回去）。
 
@@ -100,6 +154,9 @@ server/         业务实现。根只留 http.ts（信封）与 db.ts（连接�
 scripts/        api-smoke.mjs 接口体检 · turns.mts 看观测 · cases.mts 失败案例集
                 · cases-diff.mts 对比两份报告 · tasks-tick.mts 打一次 ⑩ 的 tick
                 · auto-tag.mts AI 打标
+                · test-setup.mjs 单测全局前置（改道数据根 + 生产库守卫）
+                · data-fingerprint.mjs 数据根指纹（规则的唯一定义处）
+architecture.test.ts  根目录的架构守卫：26 条跨层断言（见下「验证」）
 cases/          failure-cases.json 失败案例集 + report.ts 报告形状与「该不该删」的判定
                 （**测 agent 的，不是 agent 的一部分**）
 data/           music/（曲库源码资产）+ app.db（运行时派生，见 .gitignore）
@@ -107,7 +164,7 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 
 ---
 
-## API 一览（18 个）
+## API 一览（28 个）
 
 | 方法 | 路径 | 说明 |
 |:---|:---|:---|
@@ -115,19 +172,29 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 | GET | `/api/library/stream?trackId=` | 音频字节流，支持 Range（seek 靠它） |
 | GET | `/api/library/lyrics?trackId=&raw=` | LRC 歌词，**优先读音频内嵌（ID3 USLT）、`.lrc` 兜底**；`raw=1` 返回 text/plain |
 | GET | `/api/library/cover?trackId=` | 内嵌封面（ID3 APIC）的**原始图片字节**；无封面 → 404，前端据此回落渐变 |
+| GET | `/api/library/video?trackId=` | **伴生视频**的字节流（`X.mp4` 配 `X.mp3`），支持 Range。形状与 `stream` 逐条对齐，只有两处不同：取的是 `song.videoPath`、MIME 表是视频的。**没有伴生视频 → 404，刻意不回落到音频**——回落会让 `<video>` 拿到一段它解不了的字节、然后**静默不播**，那种"画面没反应"比 404 难查得多 |
 | GET/POST/DELETE | `/api/library/tags` | **曲目风格标签**。GET 列出（`?trackId=` 取单曲）；POST `{trackId, tags}` **重设**——**走这条 HTTP 路径就等于「人在说话」→ `source='user'`，无条件覆盖 AI**；DELETE `?trackId=` 清掉。agent 的 `set_track_tags` 工具走这里（它自己先读、再算增删、最后调这个重设）；**曲库抽屉里用户也能直接改**（每首歌下面那行标签 chip → 底部编辑条；GET 带 `?trackId=` 时还会返回 `source`，界面靠它说清「这组是 AI 打的还是你定过的」） |
 | GET | `/api/player/events` | **SSE**，播放状态**推给浏览器**的唯一来源（快照含队列来源、音量、播放方式）。agent 的 ⑦ **不走它**——服务端权威的那几项在路由里现取 |
 | GET/POST | `/api/player/play` | GET 轮询当前状态；POST `{trackId}` 点播（**不在队列里就追加到队尾**，见 BLUEPRINT §7） |
 | POST | `/api/player/pause` · `/resume` | 暂停 / 续播（无播放中 → 409） |
 | POST | `/api/player/next` | 下一首；到队尾返回 `stopped` |
 | POST | `/api/player/jump` | `{index}` 跳到队列第 index 首 |
-| POST | `/api/player/queue` | **换一批队列**：`{trackIds, label}` 换成自定义队列并开播；**`{trackIds: []}`（或省略）= 恢复整个曲库**。agent 的 `build_queue` 走这里 |
+| POST | `/api/player/queue` | **换一批队列**：`{trackIds, label}` 换成自定义队列并开播；**`{trackIds: []}`（或省略）= 恢复整个曲库**。agent 的 `build_queue` 走这里，队列卡底部的「恢复整个曲库」也走这里 |
+| POST | `/api/player/queue/remove` | **从队列里去掉一首**：`{trackId}`。队列卡上每行的 ×。入参是 id 不是下标（下标会被别处换队列挪走 → 删错歌且不报错）；不在队列里 → 404（前端说「它已经不在队列里了」，**不当失败**）；去掉的若是正在播的那首，跳到下一首并记一行播放历史，队列到空则停 |
 | GET/POST | `/api/player/settings` | **音量 / 播放方式**。GET 读当前值；POST `{volume?, mode?, shuffle?}`（0–1，越界夹紧；只改给了的字段）。agent 的 `set_volume` / `set_playback_mode` 走这里 |
 | GET | `/api/history?limit=` | 播放历史，时间倒序（默认 20，上限 200）。界面上是第 7 张卡「播放历史」（每行可点重播；点一首已经不在曲库里的歌 → 404，卡片有专门文案） |
+| GET | `/api/library/groups?by=&key=&limit=&offset=` | **曲库分组**。不带 `key` = 列出分组（`by` ∈ `artist` / `album` / `tag`，非法维度 400）；带 `key` = **这个组里的曲目**（成员由服务端算，不是拿组名去搜）。⚠️ 分桶必须在服务端：浏览器只有一页，拿它分桶会把「本页」说成「全部」 |
+| POST | `/api/library/rescan` | **重扫曲库**（丢掉进程内 memo 重新扫）。回 `{previousTotal, total, ms}`；`previousTotal` 为 `null` = 这次之前没扫过（**无从得知**，不是 0） |
+| GET | `/api/library/inspect?trackId=` | **曲库体检**。不给 `trackId` = 整库（几首 / 几首没打标 / 几个歌手 / 几首读不出歌手，并给出 `untaggedIds`）；给了 = 单曲（标签 + 谁写的 + 收藏 / 屏蔽 + 播过几次）。曲目不在曲库 → 404 |
+| GET/POST/DELETE | `/api/library/favorites` | **收藏（人的偏好）**。GET 列出（带标题与 `missing`）；POST `{trackId, on}` 收藏 / 取消（**幂等**，回 `changed` 说这次到底改没改）；DELETE `?trackId=` 取消。写成功会推一次 SSE 快照（播放条 ❤ / 全屏 ❤ / 曲库「收藏」视图**同时**变）。**本机一份不留** |
+| GET/POST/DELETE | `/api/library/hidden` | **屏蔽**。形状同上（同一套 `setFlag`）。⚠️ GET 是**解封出口之一**，必须带 `trackId`——屏蔽不是锁，但被屏蔽的歌从曲库里消失了，这是唯一还能拿到它 id 的地方 |
+| GET/POST/DELETE | `/api/playlists` | **歌单**。GET 列出（带 `count`）；POST `{name, trackIds?}` 建一份（`trackIds` = **导入**当前队列）；DELETE `?id=` 删整份（连里面的歌一起）。**没有 PUT / PATCH** |
+| GET/POST/DELETE | `/api/playlists/items` | **歌单里的歌**。GET `?id=` 列出（带标题与 `missing`）；POST `{id, trackIds}` **追加**（同曲幂等，回 `{added, skipped}`）；DELETE `?id=&trackId=` **按 id 删一首**（不收位置：位置是某一份视图里的下标，会指到另一首歌） |
 | GET/POST/DELETE | `/api/preferences` | **偏好（Agent 的长期记忆）**。GET 列出；POST `{key, value}` 记住一条（同 key 覆盖）；DELETE `?key=` 忘掉一条。agent 的 `remember` / `forget_preference` 工具走的就是这里，**界面的「记忆」卡也是** —— agent 与浏览器共用同一个 API 面（同一套校验、同一个信封），所以两边看到的必然是同一份，不存在"第二套入口各自漂移" |
 | GET/POST/PATCH | `/api/tasks` | **⑩ 排期（对用户的承诺）**。GET 列出（未完成的按该做的时间在前 + 最近做过的几条）；POST `{goal, dueAt, repeat?, repeatDays?}` 排一件（`dueAt` 必须是 ISO 8601——**不接受自然语言**，否则"现在几点"会有两份算法；`repeat` ∈ `none` / `daily` / `weekly`，`weekly` 不传 `repeatDays` 就是"每周同一天"、传了则给 0–6 的星期号，如 `[1,3,5]`）；PATCH `{id}` 撤销一件还没做完的（撤一件已完成的不算错，回 `cancelled:false`）。**参数错一律回 400 而不是 500**，判据与消息都由 `server/agent/tasks.ts` 的 `validateCreate` 给（400 = 模型换个说法就能改，500 = 服务端坏了、原样重试也没用）。⚠️ **重复任务的第一个落点也会被推到未来**：模型把时间算到了过去（实测确实会，且星期几还是对的）时，这行不会带着过去的 `due_at` 入库、然后被下一次 tick **立刻执行**——建表就复用 `nextRepeatDue`，与重排走同一条规则；一次性的（`none`）**不推**，"已经晚了就现在做"正是用户要的。agent 的 `schedule_task` / `list_scheduled_tasks` / `cancel_scheduled_task` 走这里。⚠️ **执行不在这条路由**，见下 |
 | POST | `/api/tasks/tick` | **⑩ 的执行面（打点）**。认领**一件**到期任务并跑一轮完整对话，`ran:false` = 这次没活干（正常结果）。刻意没有常驻定时器：**谁来打点都行**（cron / `npm run tasks:tick`），正确性由原子认领保证，不由"只有一个人在打点"这个假设保证。网关没配时**先挡在认领之前**（不白费 `attempts`）。一次只跑一条——一轮 7–14 秒，一次请求跑 N 条会撞平台超时，那时前面几条的副作用已经发生了 |
 | POST | `/api/agent` | **对话端点**（SSE）。body `{messages, snapshot}`——`snapshot` **只用来取设备侧的四项**（音量 / 播放方式 / 随机 / 进度），曲目与队列服务端自己知道（见 `server/player/prompt-snapshot.ts`）；协议是 AI SDK 的 UI 消息流（响应头 `x-vercel-ai-ui-message-stream: v1`），收尾是**裸** `data: [DONE]`。另回两个自定义头 **`x-prompt-version` / `x-prompt-disabled`**——那是本轮实际用的系统提示词（`npm run cases` 拿它当报告标题，比自己 import 源码算一遍可靠：服务可能正跑着上一次构建的产物） |
+| POST | `/api/voice/transcribe` | **语音输入**：**multipart**（`file` 字段放音频），回 `{text}`——填进输入框，**不自动发送**（识别会错字，而"替用户按发送"不可逆）。失败分两档：**503 = 本机没配 `VOICE_MODEL`**（你改 `.env.local`）、**502 = 上游网关的问题**（和你无关）；音频超过 `VOICE_MAX_BYTES` → 413。上限与录音容器候选表都在 `contract/voice.ts`，只有一处 |
 
 **统一信封**：所有 JSON 路由返回 `{ code, data?, message }`。
 `code === 0` 表示成功（**不是 200**），失败时 `code` 等于 HTTP status。
@@ -141,7 +208,8 @@ data/           music/（曲库源码资产）+ app.db（运行时派生，见 .
 进程内 memo。真相永远在文件系统上，再存一份到 SQLite 只会引入
 「表里的行和盘上的文件对不上」这类问题。
 
-**数据库只存扫描不出来的东西** —— 播放历史、对话历史、偏好、**曲目风格标签**与**排期任务**：
+**数据库只存扫描不出来的东西** —— 播放历史、对话历史、偏好、**曲目风格标签**、
+**收藏 / 屏蔽 / 歌单**与**排期任务**：
 
 ```
 data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
@@ -149,6 +217,10 @@ data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
   messages(id, role, parts, created_at)      -- 对话历史；id = 前端消息 id，upsert 天然幂等
   preferences(key, value, updated_at)        -- Agent 的长期记忆；key 唯一 = 同一条偏好
   track_tags(track_id, tags, source, updated_at)  -- 风格标签；track_id 唯一，source ∈ {ai, user}
+  favorites(track_id, created_at)                 -- 收藏；track_id 唯一（人的偏好，真相在服务端）
+  hidden(track_id, created_at)                    -- 屏蔽；track_id 唯一；过滤点只有 visible.ts 一处
+  playlists(id, name, created_at)                 -- 歌单；id 是生成的不透明 id（名字不是标识）
+  playlist_items(playlist_id, track_id, added_at) -- 歌单里的一首；(playlist_id, track_id) 唯一
   tasks(id, goal, due_at, repeat, repeat_days, status, attempts, last_error,
         result, created_at, last_run_at)     -- ⑩ 排期；一行 = 一件"跨轮的目标"
                                                  -- repeat ∈ {none, daily, weekly}
@@ -168,11 +240,15 @@ data/app.db  (SQLite, node:sqlite —— Node 内置，零 npm 依赖)
 - 建表语句**只在 `server/db.ts`** 出现。加表就往 `migrate()` 里追加一条；**给已有的表加列**时
   还要登记进 `ADDED_COLUMNS`——`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，
   只改 `CREATE` 的话老库升上来会少那一列（而写入是流水语义，于是观测静默停摆、不报错）。
-- 七张表的**失败语义不同，且是有意的**：`plays` / `messages` / `agent_turns` / `agent_spans`
+- 十一张表的**失败语义不同，且是有意的**：`plays` / `messages` / `agent_turns` / `agent_spans`
   是流水，写失败只记日志
-  （不该打断播放或对话）；`preferences` / `track_tags` / `tasks` 是 agent 对用户的**承诺**
-  （它说了「记住了」「改好了」「明早七点叫醒你」），写失败必须让模型知道——否则用户下次
+  （不该打断播放或对话）；`preferences` / `track_tags` / `favorites` / `hidden` / `playlists` /
+  `playlist_items` / `tasks` 是 agent 对用户的**承诺**
+  （它说了「记住了」「改好了」「收起来了」「明早七点叫醒你」），写失败必须让模型知道——否则用户下次
   发现它又忘了、或一直干等一件**根本没排上**的事，却找不到任何线索。
+  （读也分两档：`hidden` 读失败是**fail-open**——它的消费者是整条曲库链，读不出来就当没屏蔽，
+  否则一次抖动会让六首歌集体消失；歌单读失败**照抛**——用户点开歌单要的是清单，空着说"好了"
+  比报错更糟。）
 - **`agent_turns` 回答的是 `messages` 答不了的那一半**：几轮工具、哪个工具慢、
   有没有被 `MAX_STEPS` 截断、花了多少 token 与多少钱、用户等了多久才看到第一个字。
   一行 = 一轮（不是一条消息），用 `npm run turns` 看。
@@ -287,7 +363,7 @@ BASE=http://127.0.0.1:3100 npm run tasks:tick
 ```bash
 npm run lint        # ESLint
 npx tsc --noEmit    # 全仓类型检查
-npm test            # 单测（node:test，纯函数模块）
+npm test            # 单测（node:test）。挂着全局前置：数据根改到临时目录 + 退出时比对生产 data/
 npm run build       # 生产构建
 BASE=http://127.0.0.1:3100 npm run smoke:api   # 接口冒烟（需先起服务）
 npm run turns       # 看最近几轮对话的观测（⑨）：步数 / 工具链 / 耗时 / 首字延迟 / token / 钱
@@ -305,12 +381,24 @@ npm run cases:diff -- <A.json> <B.json>          # 两份报告放一起 → 「
 `scripts/api-smoke.mjs` 会顺带断言**信封不变式**（`code` 与 HTTP status 一致），
 以及「播放之后历史确实落库了」。
 
+**架构守卫**（`architecture.test.ts`，26 条）把这份 README 里的**目录约定**变成了可执行断言：
+`agent → server` 只许 `import type` · `contract/` 零业务依赖 · `components/` 不碰 `server/` ·
+路由不手写信封 · 卡片 id 的六处清单**集合相等** · `tsconfig.include` 覆盖所有源码后缀 ·
+伴生视频扩展名清单只有一处 / 画面不拥有播放 / 没有视频不许回落到音频。
+判据是「**写文档会被忽略，写测试会拦住你**」——这几条原本是纯口头的，改写其中任何一条的代价，
+是它**不报错**，只是慢慢地漏。
+
+`npm test` 的全局前置（`scripts/test-setup.mjs`）干两件事：把数据根改到临时目录，
+并在收尾时比对仓库 `data/` 的指纹——**测试永远不该碰到你的真库**，而这件事原来靠
+「每个测试自己记得设 `APP_DB_PATH`」。
+
 ---
 
 ## 文档索引
 
 | 文档 | 何时读 |
 |:---|:---|
+| [AGENT-OVERVIEW.md](./AGENT-OVERVIEW.md) | **想先搞懂这个 agent 是怎么运转的**：把散在各处的 agent 内容整合成一份（十个部件、上下文怎么处理、记忆怎么分层、观测与评测…），带名词解释，有一点点 agent 基础就能读 |
 | [BLUEPRINT.md](./BLUEPRINT.md) | 动 Agent 之前必读：十个部件在哪、需求往哪个部件下手、选型判据、错题本、路线图 |
 | [AGENTS.md](./AGENTS.md) | 改代码前必读：协作红线、验证与调试、目录约定 |
 | [LEARNING.md](./LEARNING.md) | 想知道「哪条 prompt 该删、哪个部件才是护城河」：一把尺子（🔒 学不走 / 🧊 会被学走 / ⚪ 弯路 / ⚠️ 像补丁其实是边界）+ 本项目逐项体检。配 `LEARNING-01-跟着一次请求走.md`（教材）与 `LEARNING-QUIZ.md`（考卷） |

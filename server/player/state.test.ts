@@ -19,7 +19,9 @@ import {
 	ensureQueue,
 	getPlayerState,
 	getSnapshot,
+	jumpToIndex,
 	playTrack,
+	removeFromQueue,
 	setPlayback,
 	setQueueAndPlay,
 	setVolume,
@@ -34,6 +36,7 @@ const song = (n: number): Song => ({
 	filePath: `/曲${n}.mp3`,
 	hasLyrics: true,
 	hasCover: true,
+	videoPath: null,
 });
 
 const [A, B, C] = [song(1), song(2), song(3)];
@@ -131,4 +134,109 @@ test('setVolume / setPlayback：只改给了的字段', () => {
 	snap = getSnapshot();
 	assert.equal(snap.mode, 'one', '只改随机不该动循环方式');
 	assert.equal(snap.shuffle, true);
+});
+
+/* ── 去掉一首（队列卡上的 ×，2026-09-28）──────────────────────────────── */
+
+test('removeFromQueue：去掉的不是正在播的那首 —— 播放不受影响，但**当前位置必须平移**', () => {
+	setQueueAndPlay([A, B, C]);
+	jumpToIndex(2); // 正在播的是 C（第 3 项）
+	getPlayerState().positionSec = 42; // 已经播了 42 秒
+
+	const r = removeFromQueue(A.id); // 去掉排在最前面的那首
+
+	assert.ok(r);
+	const snap = getSnapshot();
+	assert.deepEqual(snap.queue.map((s) => s.id), ['曲2.mp3', '曲3.mp3']);
+	assert.equal(snap.currentTrack?.id, '曲3.mp3', '去掉别的项不该换掉正在播的那首');
+	assert.equal(snap.positionSec, 42, '去掉别的项不该让进度回到 0');
+	assert.equal(snap.state, 'playing');
+	assert.equal(r.started, null, '没有「开始播一首新歌」，不该往 plays 记一行');
+	// ⚠️ 这一条是这条函数里最容易写漏、且**漏了不报错**的地方：剩下的 C 现在排第 2 位，
+	// 位置索引若不平移就指到 B 上去 —— 界面上的均衡器跑到别人的行上、
+	// next_track 从错的位置往下走。
+	assert.equal(snap.queueIndex, 1);
+});
+
+test('removeFromQueue：去掉正在播的那首 → 跳到原位置上的下一首，并回报 started', () => {
+	setQueueAndPlay([A, B, C]); // 当前是 A（index 0）
+	getPlayerState().positionSec = 30;
+
+	const r = removeFromQueue(A.id);
+
+	assert.ok(r);
+	const snap = getSnapshot();
+	assert.deepEqual(snap.queue.map((s) => s.id), ['曲2.mp3', '曲3.mp3']);
+	assert.equal(snap.currentTrack?.id, '曲2.mp3', '应该是原位置的下一首（B），不是队首重来');
+	assert.equal(snap.queueIndex, 0);
+	assert.equal(snap.positionSec, 0, '换了一首歌，进度要归零');
+	assert.equal(snap.state, 'playing');
+	assert.equal(r.started?.id, '曲2.mp3', '真的开始播了 B —— 调用方要据此记一行播放历史');
+});
+
+test('removeFromQueue：去掉正在播、且它是队尾那首 → 停（与「播完了」同形）', () => {
+	setQueueAndPlay([A, B, C]);
+	jumpToIndex(2); // C 在播，且它是最后一首
+
+	const r = removeFromQueue(C.id);
+
+	assert.ok(r);
+	const snap = getSnapshot();
+	assert.deepEqual(snap.queue.map((s) => s.id), ['曲1.mp3', '曲2.mp3']);
+	assert.equal(snap.state, 'stopped');
+	assert.equal(snap.currentTrack, null);
+	assert.equal(snap.queueIndex, -1);
+	assert.equal(snap.positionSec, 0);
+	assert.equal(r.started, null);
+});
+
+test('removeFromQueue：去掉到空 —— 空队列是合法终态', () => {
+	setQueueAndPlay([A]);
+
+	const r = removeFromQueue(A.id);
+
+	assert.ok(r);
+	const snap = getSnapshot();
+	assert.equal(snap.queueSize, 0);
+	assert.equal(snap.state, 'stopped');
+	assert.equal(snap.queueIndex, -1);
+	assert.equal(r.started, null);
+});
+
+test('removeFromQueue：不在队列里 → undefined，且**一个字段都不动**', () => {
+	setQueueAndPlay([A, B], { label: '安静的歌' });
+	const before = getSnapshot();
+
+	const r = removeFromQueue('曲99.mp3');
+
+	assert.equal(r, undefined);
+	assert.deepEqual(getSnapshot(), before, '没找到就不该有任何副作用');
+});
+
+test('removeFromQueue：从整库队列去掉一首 → 身份变 custom，**下一次点播不会把它找回来**', () => {
+	ensureQueue([A, B, C]); // 整库队列（默认形态，queueSource === 'library'）
+	jumpToIndex(1); // B 在播
+
+	const r = removeFromQueue(B.id);
+
+	assert.ok(r);
+	assert.equal(getSnapshot().queueSource, 'custom', '它已经不是「整个曲库」了，身份必须跟着改');
+
+	// 点播路径每次都会调它（`app/api/player/play/route.ts`）。若身份还留在 'library'，
+	// 这里会把刚去掉的 B 原样找回来 —— 而界面已经告诉用户「去掉了」。两次都不报错，
+	// 用户只会觉得「删了又回来了」。这条断言就是那个「不撒谎」的证据。
+	ensureQueue([A, B, C]);
+	assert.deepEqual(getSnapshot().queue.map((s) => s.id), ['曲1.mp3', '曲3.mp3']);
+});
+
+test('removeFromQueue：自定义队列去掉一首 —— 身份与名字都不变（它本来就是这一批）', () => {
+	setQueueAndPlay([A, B, C], { label: '安静的歌' });
+
+	const r = removeFromQueue(B.id);
+
+	assert.ok(r);
+	const snap = getSnapshot();
+	assert.equal(snap.queueSource, 'custom');
+	assert.equal(snap.queueLabel, '安静的歌', '去掉一首不等于换一批，名字不该丢');
+	assert.deepEqual(snap.queue.map((s) => s.id), ['曲1.mp3', '曲3.mp3']);
 });

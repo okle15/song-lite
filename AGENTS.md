@@ -21,7 +21,7 @@
 | `agent/` | Agent 本体：`provider`（接入）/ `run`（循环）/ `tools`（工具）/ `prompt`（提示词）。**不 import `server/`**——工具用 HTTP 打自家 BFF。十个部件的落点见 [BLUEPRINT.md](./BLUEPRINT.md) |
 | `server/` | 业务实现。根只留 `http.ts`（信封）与 `db.ts`（连接），其余归入 `agent/ library/ player/ records/` |
 | `telemetry/` `eval/` | **已不存在**（随最简化删除），别再往这里加东西 |
-| `scripts/` | 给开发者自己用的脚本：`api-smoke.mjs` 接口体检 · `turns.mts` 看观测 · `cases.mts` 失败案例集 · `cases-diff.mts` 对比两份报告 · `tasks-tick.mts` 打一次 ⑩ 的 tick · `auto-tag.mts` AI 打标 |
+| `scripts/` | 给开发者自己用的脚本：`api-smoke.mjs` 接口体检 · `turns.mts` 看观测 · `cases.mts` 失败案例集 · `cases-diff.mts` 对比两份报告 · `tasks-tick.mts` 打一次 ⑩ 的 tick · `auto-tag.mts` AI 打标 · `test-setup.mjs` 单测全局前置 · `data-fingerprint.mjs` 数据根指纹 |
 | `cases/` | **失败案例集**：`failure-cases.json`（判据）+ `report.ts`（报告形状与「该不该删」的判定）。它是**测 agent 的**，不是 agent 的一部分：不在 `agent/` 里、不被 `app/` 引用、不参与构建（BLUEPRINT §6） |
 | `data/` | `music/` 是曲库源码资产；`app.db` 是运行时派生数据（gitignore） |
 
@@ -30,14 +30,27 @@
 agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各自漂移」。
 `components/` 不许 import `server/`，`server/` 不许 import `next/server`（唯一例外是 `http.ts`，
 它的职责就是适配成 HTTP 响应）。
+⚠️ **这几条不是口头约定，是根目录 `architecture.test.ts` 里的断言**（26 条，09-28 建）——
+包括「路由不手写信封」「卡片 id 的六处清单集合相等」「`tsconfig.include` 覆盖所有源码后缀」
+「分组维度清单只许一处」「`server/library/` 不许动文件系统」「伴生视频扩展名清单只许一处」
+「画面不拥有播放」「没有伴生视频不许回落到音频」。
+改任何跨层引用前先跑 `npm test`：**写文档会被忽略，写测试会拦住你**。
 
 ---
 
 ## 数据与持久化
 
 - **曲库不落库**：曲目来自对 `MUSIC_DIR` 的实时扫描（进程内 memo），真相在文件系统上。
+- **进程内 memo 与「重扫」**：扫描是 I/O + 解析、代价高，结果在**进程存活期内** memo 一次，
+  所以新丢进目录的歌要 `POST /api/library/rescan` 丢掉 memo 才可见（`previousTotal: null` =
+  这次之前没扫过，**不是 0**——那是「无从得知」，不是「库里本来没有」）。
+- **分组 / 体检都从可见曲库取数**（`getSongs()`）：分桶只在服务端做（前端手里只有一页），
+  被屏蔽的歌不进任何一组，与它在检索里的处境一致。`organize` **不整理文件**——只读体检，
+  因为改文件名 = 改 `Song.id` = `plays` / `track_tags` 全失联（见 §2.3「改唯一标识 = 数据迁移」）。
 - **数据库只存扫描不出来的东西**：`plays`（播放历史）、`messages`（对话历史）、
   `preferences`（⑥ 记忆，一行 = 一条长期偏好）、`track_tags`（曲目风格，一行 = 一首歌）、
+  `favorites` / `hidden`（收藏 / 屏蔽，**人的偏好**，一行 = 一首歌）、
+  `playlists` / `playlist_items`（歌单，一份一行 / 里面一首一行）、
   `tasks`（⑩ 排期，一行 = 一件跨轮的目标）与两张观测表 `agent_turns` / `agent_spans`。
 - **风格标签的优先级由「入口」决定，不由调用方声明**：走 `POST /api/library/tags`
   （人或 agent 在说话）= `source='user'`，无条件覆盖；AI 批量打标走 `npm run tag:library`
@@ -50,12 +63,24 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
 - **`preferences` 用 `key` 唯一性定义「什么算同一条偏好」**：同 key 覆盖，不追加（否则用户说五遍
   「不喜欢摇滚」会记五条）。归一化规则（大小写 / 空格 / 连字符）在 `contract/preference.ts`，
   **工具侧与存储侧共用同一份**，不许另写一份。
-- **七张表的失败语义不同，且是有意的**：`plays` / `messages` / `agent_turns` / `agent_spans`
-  是**流水**，写失败只记日志（不该打断
-  播放或对话）；`preferences` / `track_tags` / `tasks` 是 agent 对用户的**承诺**（它已经说了
-  「好，我记住了」/「改好了」/「明早七点叫醒你」），写失败必须抛到路由 → 变成工具失败 → 模型据实告知。
-  **加新表时先问一句：它失败时，谁需要知道？**
-  `tasks` 归承诺那一类的判据：任务没排上，用户会**一直干等**——那不是"少一行统计"。
+- **十一张表的失败语义不同，且是有意的**：`plays` / `messages` / `agent_turns` / `agent_spans`
+   是**流水**，写失败只记日志（不该打断
+   播放或对话）；`preferences` / `track_tags` / `favorites` / `hidden` / `playlists` /
+   `playlist_items` / `tasks` 是 agent 对用户的**承诺**（它已经说了
+   「好，我记住了」/「改好了」/「收起来了」/「明早七点叫醒你」），写失败必须抛到路由 → 变成工具失败 → 模型据实告知。
+   **加新表时先问一句：它失败时，谁需要知道？**
+   `tasks` 归承诺那一类的判据：任务没排上，用户会**一直干等**——那不是"少一行统计"。
+   ⚠️ **读也分两档**：`hidden` 读失败 **fail-open**（它的消费者是整条曲库链，读不出来就当没屏蔽——
+   否则一次抖动会让整库集体消失）；歌单读失败 **照抛**（用户点开歌单要的是清单，空着说"好了"更糟）。
+- **收藏 / 屏蔽 / 歌单都是「人的偏好」，真相只在服务端**（`contract/library-flags.ts`）：
+  过滤点只有 `server/library/visible.ts` 的 `splitHidden()` 一处（曲库六七个出口，漏一个就是
+  「被屏蔽的歌从那条路回来了」，而队列里多一首**看不出来**）；整批替换必须过
+  `mergePreservingHidden()`。屏蔽**不是锁**——拿着 id 点名要放仍然放得出来，否则那首歌再也
+  拿不到 id、解封入口随之消失（`findSongById` 因此**不过滤**）。
+- **歌单刻意没有「整表替换」入口**（`app/api/playlists` 上没有 PUT / PATCH）：加歌是**追加**
+  且同曲幂等，删歌是**按 `trackId` 删一行**——模型只看得到队列的**窗口**，给它整份覆盖的接口
+  会把用户原来那一批悄悄换走，且**不报错**。id 是**生成的不透明 id**：名字不是标识，
+  拿名字当主键的话改名就变成一次数据迁移。
 - **⑨ 观测是 `agent_turns`**（一行 = 一轮对话，`id` 与 `messages` 表同键、可 join）：
   `/api/agent` 的 `onEnd` 取数（`result.steps` / `toolOutcome.ms` / `isAborted`），
   写得靠 `recordTurn`（失败只 log），**读靠 `npm run turns`**。
@@ -287,15 +312,37 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
   `globals.css` 里读、不另抄一份），所以下一次加卡或调权重它会红。
   老用户那份布局里没有新卡，走的是既定的升级路径：`sanitizeLayout` 把它补进 `hidden`，
   从「卡片」菜单恢复（`panel-layout.test.ts` 有一条用例专门守着这条路）。
-- **给一个工具加确认闸门要同时改四处，其中两处「不写对也不报错」**：
+- **给一个工具加确认闸门要同时改五处，其中三处「不写对也不报错」**：
   ① `agent/run.ts` 的 `toolApproval`（`streamText` 的**原生选项**，与 `stopWhen` 同一层）
-  里加一行 `工具名: 'user-approval'`。
+  里加一行 `工具名: 'user-approval'`。**若同一个工具里既有无害动作又有删除动作**，
+  值可以是一个**按入参判的函数**（返回 `'not-applicable'` 或 `{ type: 'user-approval', reason }`），
+  而不是整开关 —— 现成的例子是 `set_track_tags: tagEditApproval`：**只有 `remove` 要问，
+  `add` 不问**。⚠️ 整开关会把无害的那一半也拦住，而**被拦烦了的用户会见框就点**，
+  于是闸门等于失效；这条取舍要写进那个函数自己的注释里（它同时是单测的对象）。
+  函数返回的 `reason` 会以 `approval.requestReason` 到前端，`ChatCard` **有它就念它**
+  （替换掉那句笼统的"回不来了"）—— 所以要写成用户看得懂、并且**点名要删的是什么**的一句话。
   ⚠️ **不是**在 `agent/tools.ts` 里给工具加 `needsApproval` —— 那个选项在本版
   `@ai-sdk/provider-utils` 的类型里已标 `@deprecated`（原文："Tool approval is handled on a
   `generateText` / `streamText` level now"）。照旧写法加**不报错**（类型仍是 `boolean`），
   于是仓里会长出两套并存的写法，而"哪一套在生效"没人说得清。
-  判据是「**删的是用户的东西**」，不是"危险"这种说不清的词 ——
-  本项目只有 `forget_preference` / `cancel_scheduled_task` 两个；
+  ⚠️ **判据是「删的是用户的东西」**，不是"危险"这种说不清的词 —— 本项目三个：
+  `forget_preference` / `cancel_scheduled_task` / `set_track_tags`（**仅 `remove`**）。
+  ⚠️ **反向也要判，而且要写下来**：`build_queue` / `remove_from_queue` **不加** ——
+  队列是**状态**不是数据（`server/player/state.ts` 挂在 globalThis 上，重启即回整库），
+  被去掉的曲目仍在曲库里、随时能再点播回来；而 `build_queue` 是「来点安静的」**最常见**的
+  走法，给它装闸门等于拦住主流程。**"差不多的东西应该一视同仁"在这里是错的**：
+  判据问的是"删没删用户的东西"，不是"改没改状态"。
+  ⚠️ **拒答那一侧也要给一句话**：`addToolApprovalResponse({ id, approved, reason })` 的
+  `reason` 会随拒答回给模型（`ChatCard` 的 `DENY_REASON` 经 `home-client.tsx` 透传）。
+  **不给的话**，provider 只会发一句光秃秃的 `"Tool call execution denied."`
+  （`@ai-sdk/openai-compatible` 的 tool-result 分支：`contentValue = output.reason ??
+  "Tool call execution denied."`），模型只能去猜。09-28 端到端实测它猜出了两样都不该有的：
+  ① **再试一次** —— 同一轮里第二次调同一个工具，于是界面上在「已放弃」后面又冒出一个
+  待确认框（用户明明刚说了"算了"）；② **把它说成故障** —— 原话是「工具调用失败了，
+  可能是权限限制」，用户于是以为系统坏了，而不是"我自己刚拒绝的"。
+  两样**都不是**安全问题（闸门两次都拦住了、标签一个字节没动），但都是**用户看得见的**。
+  所以那句话要说清三件事：**谁拒的、为什么没执行（排除故障与权限）、别重试**。
+  ⇒ 加闸门时要改的地方其实有**五处**，这一处最容易被漏，因为**它不在"拦住"这条主线上**。
   ② `components/ChatCard.tsx` 渲染待确认框（`approval-requested`）与「执行 / 算了」两个按钮，
   外加答复后的文案（「已放弃（你没有批准）」）；
   ③ **只有最后一条消息上的确认框配拥有按钮**：`addToolApprovalResponse` 只更新
@@ -352,6 +399,29 @@ agent 与浏览器因此共用同一个 API 面，不存在「第二套入口各
   冒烟「还原现场」照常 PASS，真库里躺着的就是 0 —— 用户打开播放器是静音，而且不会有任何报错）。
   **碰过真库的探针用完自己复位，别指望下一个脚本替它兜。**
   **加任何"写真实状态"的用例时，顺手加它的还原动作。**
+- **冒烟也能断言「被正确拒绝」**（2026-09-28 加）：用例写 `expect: 'fail'` + `expectStatus`，
+  判据是状态码 ——「该拒的没拒」与「该通的没通」是两种病，混成一句「失败」会让人去查错方向。
+  首次用在 `player/queue/remove` 的「缺参 400」「不在队列里 404」两条上：它们判的正是
+  「服务端有没有守住边界」，而不是「接口能不能用」。
+- **配置相关的接口用 `expect: 'either'`**（2026-09-28 加，语音转写）：结果**取决于本机配没配**
+  （没配 `VOICE_MODEL` → 503；配了 → 200/502）。判据交给 `assert`，它必须同时说清
+  「成功时该符合什么」与「失败时该像哪一档」—— 这样两种环境都不假红，
+  而「编一个结果」（比如失败却不说话）仍然会被抓住。
+- **multipart 用例写 `form:`**（同上）：`call()` 认 `form: FormData` 就直传，**不设 `Content-Type`**
+  ——自己设会把 fetch 要带的 `boundary=...` 覆盖掉，服务端解不出来，而症状只是「400 缺字段」，
+  看着像用例写错了。
+- ⚠️ **探针别去量一个「会饱和的量具」**（2026-09-28 实测）：历史卡一次只取 20 行
+  （`HistoryCard.tsx` 的 `limit=20`），隔离库攒到 42 条之后，「播放后历史多了一行」
+  这条**按 DOM 行数**数的断言**永远为假**（20 → 20）—— 看着像回归，其实是量程打满。
+  改法：**增量去服务端数**（`/api/history?limit=200` 的条数 42 → 43），
+  DOM 那侧只判「行数 = min(总条数, 量程)」。判据要能回答「它现在是量不出来，还是真的没变」。
+- **同一个组件挂了两次 → 选择器必须限定作用域**（2026-09-28）：`QueueList` 在
+  `home-client.tsx` 里既是右列的一张卡、又是底部抽屉（`aside[aria-label="播放队列"]`，
+  用 `translate-y-full` 藏在视口外）。不限定的 `ul > li button[…]` 会**同时命中两份**，
+  于是「点了一个看不见的按钮」也能全绿。做法：选择器一律从 `[data-pane-id="pane-queue"]`
+  出发，并**顺手把这条陷阱变成一条断言**（未限定的数量 = 限定数量的 2 倍）。
+  ⚠️ 判断那个抽屉"是不是藏着的"**不能用 `offsetParent`**（它只看 `display:none`、
+  不看 transform），要量它的 `boundingBox().y`（≈视口高）。
 - **验「模型有没有读反工具输出」之前，先确认你造的数据能不能证伪**：这一轮做过一次**空验证**——
   为了让 `list_tags` 的"哪些是 AI 打的"有内容，我全用 `POST /api/library/tags` 播种，而
   **那个入口的 `source` 恒为 `'user'`**（设计如此，见上「数据与持久化」），数据里根本没有
@@ -427,9 +497,11 @@ npm run cases:diff -- full.json no-ws.json
 
 - `npx tsc --noEmit` 覆盖全仓（`tsconfig.json` 用**显式 include 列表**，不是 `**/*`）。
   **新增顶层目录 / 新后缀时要回来补 include** —— 漏了的后果是那个目录**既不被 tsc 看、
-  也没人提醒**（`scripts/**/*.mts` 与 `cases/**/*.ts` 已在列表里，所以 `tasks-tick.mts` 与
-  `cases/report.ts` 这类是被检查的；而 `scripts/*.mjs`（`api-smoke.mjs`）不在列表里，
-  只靠 ESLint 与"跑一遍"兜着）。
+  也没人提醒**。⚠️ 这条**已经写成断言**：`architecture.test.ts` 会遍历仓库里所有源码后缀，
+  逐个问「include 认不认它」（09-28 加 `*.mjs` + `scripts/**/*.mjs` 就是它先报出来的 ——
+  此前 `scripts/*.mjs`（`api-smoke.mjs`）确实只靠 ESLint 与"跑一遍"兜着）。
+  ⚠️ 断言**必须自己列举后缀**，别去问 tsc：本机 `node` 里再 `spawn` node 一律 `EBUSY`，
+  「让 tsc 报出文件清单」这条路走不通（试过 `--listFilesOnly`）。
   ⚠️ **`moduleResolution: bundler` 不认带 `.mts` 扩展名的相对导入**（`TS5097`），
   所以 `scripts/*.mts` 之间不能 `import './x.mts'`、也不能（extensionless）解析到 `.mts`。
   共享模块要么放 `.ts` 目录（`cases/report.ts` 就是这么定下来的），要么开
@@ -440,6 +512,14 @@ npm run cases:diff -- full.json no-ws.json
 - **单测：`npm test`**（`tsx --test`，node:test + node:assert，无额外框架）。
   新增目录要同步改 `package.json` 里的 glob。
 - **单测就近放**：测 `contract/` 的模块就放 `contract/`，测 `server/player/media.ts` 就放它旁边。
+- ⚠️ **`npm test` 挂着一条全局前置**（`--import ./scripts/test-setup.mjs`，09-28 建）：
+  它在**任何业务模块求值之前**把数据根改到临时目录（`APP_DB_PATH` → `mkdtemp`），
+  收尾时再比对仓库 `data/` 的指纹，变了就 `exitCode = 1`。
+  于是**新加测试不必再各自设 `APP_DB_PATH`**（此前 5 个测试各设各的，漏一个就静默写进真库）。
+  别手写 `tsx --test` 绕过它——绕过 = 改道与生产库守卫同时失效，而这**不报错**。
+  指纹规则的唯一定义处是 `scripts/data-fingerprint.mjs`，**别在别处再写一份比对脚本**
+  （两侧规则各写一遍 → 不对称 → 会造出"有变化"这个假象）。
+  `architecture.test.ts` 里有一条自证：跑测试时若前置没装上，它专门红。
 
 ---
 

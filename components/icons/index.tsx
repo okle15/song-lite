@@ -121,6 +121,40 @@ export function FavOnIcon({ size = 16, ...rest }: IconProps) {
   );
 }
 
+/** 屏蔽：圆 + 斜杠。语义是「这首以后别自动放」，不是「删掉」——所以用禁止符而不是垃圾桶。 */
+export function BlockIcon({ size = 16, ...rest }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
+      <circle cx="12" cy="12" r="8.6" />
+      <path d="M6.1 17.9 17.9 6.1" />
+    </svg>
+  );
+}
+
+/** 歌单：两行列表 + 实心音符（与「播放队列」的区别是它**持久**，所以没有播放三角）。 */
+export function PlaylistIcon({ size = 16, ...rest }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
+      <path d="M3.75 7h11M3.75 16.5h11" />
+      <path d="M18.6 4.6v9.1" strokeWidth={2.4} />
+      <path d="M21.5 4.6v5.2" strokeWidth={2.4} />
+      <path d="M18.6 13.7a1.9 1.9 0 1 1-1.9 1.9V4.6" />
+    </svg>
+  );
+}
+
+/** 删除：垃圾桶。**只用于「删掉用户攒的东西」**（整份歌单），可逆的动作不用它。 */
+export function TrashIcon({ size = 16, ...rest }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
+      <path d="M4.6 7h14.8" />
+      <path d="M9.4 7V4.8h5.2V7" />
+      <path d="M6.5 7l.9 12.2h9.2L17.5 7" />
+      <path d="M10.4 10.6v5.4M13.6 10.6v5.4" />
+    </svg>
+  );
+}
+
 /** 播放队列：三行列表 + 实心八分音符。 */
 export function QueueIcon({ size = 16, ...rest }: IconProps) {
   return (
@@ -276,3 +310,26 @@ export function GridIcon({ size = 16, ...rest }: IconProps) {
     </svg>
   );
 }
+
+/** 麦克风（语音输入的入口；录音态由父元素用 text-red-400 染色）。 */
+export function MicIcon({ size = 16, ...rest }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
+      <rect x="9" y="3" width="6" height="11" rx="3" />
+      <path d="M5.8 11.4a6.2 6.2 0 0 0 12.4 0" />
+      <path d="M12 17.6V21" />
+      <path d="M9 21h6" />
+    </svg>
+  );
+}
+
+/** 影片（伴生视频的入口：全屏沉浸页里切「歌词 / 视频」的那颗）。 */
+export function VideoIcon({ size = 16, ...rest }: IconProps) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" {...commonStroke} {...rest}>
+      <rect x="2.6" y="6" width="13" height="12" rx="2.6" />
+      <path d="M15.6 11.4 21.4 8v8l-5.8-3.4Z" />
+    </svg>
+  );
+}
+

@@ -38,6 +38,7 @@ const snap = (over: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
 		artist: '凤凰传奇',
 		album: '最炫民族风',
 		hasCover: true,
+		hasVideo: false,
 	},
 	positionSec: 42,
 	// 这三个字段必须**自洽**：queueSize 6 / queueIndex 2 就得真有 6 项。
@@ -54,6 +55,11 @@ const snap = (over: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
 	volume: 0.8,
 	mode: 'seq',
 	shuffle: false,
+	// 收藏 / 屏蔽（2026-09-28 加）：这两项**不进提示词**（与风格标签同一个处置 ——
+	// 模型要用时调 `list_favorites` / `list_hidden`）。fixture 里给全是因为
+	// `PlayerSnapshot` 是必填类型，漏了 tsc 会红。
+	favoriteIds: [],
+	hiddenIds: [],
 	...over,
 });
 
@@ -215,8 +221,12 @@ test('队列来源：自定义队列要写清「按什么挑的」，默认整�
 	assert.match(custom, /队列：共 6 首（按「安静的歌」挑的一批），当前第 3 首/);
 	// 整库那一批不加这句：那是默认形态，写出来只是噪音（而且每轮都在）
 	assert.doesNotMatch(buildSystemPrompt(snap()), /挑的一批/);
-	// 有 custom 但没 label（理论上不该发生）时也不能吐出 undefined
+	// custom 但**没有** label 是**真会发生**的（原先这里写着"理论上不该发生"，是错的）：
+	// 用户从整库队列里去掉一首，服务端就把这批就地提升成 custom（内容编辑 = 身份编辑，
+	// 见 `removeFromQueue`）。它**没有任何名字可依托** —— 不写出来，模型就看不出
+	// "你改过的一批"与"跟着曲库"的区别，也就答不了"为什么新加的歌没进来"。
 	const bare = buildSystemPrompt(snap({ queueSource: 'custom', queueLabel: null }));
+	assert.match(bare, /队列：共 6 首（你改过的一批，不跟着曲库变），当前第 3 首/);
 	assert.doesNotMatch(bare, /undefined|null/);
 });
 

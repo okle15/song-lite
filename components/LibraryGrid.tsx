@@ -20,6 +20,17 @@
  *    `source='user'`、无条件压过 AI 打标（判定在 `server/library/tags.ts`）——
  *    「谁写的」这件事光看结果看不出来，所以编辑条上把它写出来。
  *
+ * ── 2026-09-28：收藏与屏蔽的**界面出口**（能力与 §0 三条红线一起补）─────
+ * 4. **屏蔽的写入口**。服务端从这一版起过滤被屏蔽的曲目（`getSongs()` 是可见
+ *    曲库的唯一产出点，见 `server/library/visible.ts`）。**读过滤与写保护必须成对**：
+ *    只过滤、不给写入口，用户想屏蔽一首歌就只能去求 agent，而他已经屏蔽的
+ *    那些歌在界面上也无从解除。卡片上的 ⊘ 就是那一半。
+ * 5. **「收藏 / 已屏蔽」两个视图**。它们同时是**解封出口**：被屏蔽的歌在检索里
+ *    已经搜不到了（那是过滤的本意），所以「把那首放回来」必须有一个能看见它、
+ *    拿得到它 id 的地方 —— `GET /api/library/hidden` 是唯一的一处。
+ *    ⚠️ 这两个视图**照旧列出文件已经不在曲库里的条目**（`missing`）：收藏过一首后来
+ *    改名的歌会变成一行没有歌的标记，静默丢掉它 = 用户再也想不起自己收藏过什么。
+ *
  * 设计要点：
  *  - 封面走 `<TrackCover>`：有内嵌封面就显示真图（`/api/library/cover`），没有才回落到
  *    「标题首字 + 渐变」。`hasCover` 由本接口的响应直接给出，所以无封面的曲目
@@ -37,10 +48,14 @@ import { usePlayerSnapshot } from './PlayerProvider';
 import { failureNote } from './failure-note';
 import { listPhase } from './list-phase';
 import { planTagSave, tagButtonDisabled, tagButtonLabel } from './tag-editor';
+import { fetchFlagRows, postFlag, FlagError } from './flag-client';
+import { FLAG_LABEL, type FlagKind, type FlagRow } from '@/contract/library-flags';
+import { GROUP_BY, GROUP_BY_LABEL, type GroupBy } from '@/contract/library-groups';
+import { LibraryGroups } from './LibraryGroups';
 import { fmtTime } from './player-events';
 import { useEscapeToClose } from './use-escape-to-close';
 import { TrackCover } from './TrackCover';
-import { CloseIcon, LibraryIcon, PlayIcon, SearchIcon } from './icons';
+import { BlockIcon, CloseIcon, FavIcon, FavOnIcon, LibraryIcon, PlayIcon, SearchIcon } from './icons';
 
 type Song = {
 	id: string;
@@ -57,6 +72,16 @@ type Song = {
 /** 一次取多少。服务端上限 50 —— 12 在 4 列下正好 3 行，不把首屏撑得太长。 */
 const PAGE = 12;
 const DEBOUNCE_MS = 250;
+
+/**
+ * 抽屉的三个视图。**「收藏 / 已屏蔽」不只是列表，它们是解封出口** ——
+ * 被屏蔽的歌在检索里搜不到了，只有这里还能看见它、拿到它的 id。
+ */
+const TABS: { key: 'all' | FlagKind; label: string }[] = [
+	{ key: 'all', label: '曲库' },
+	{ key: 'favorite', label: FLAG_LABEL.favorite.name },
+	{ key: 'hidden', label: FLAG_LABEL.hidden.name },
+];
 
 type SearchBody = { data?: { songs?: Song[]; total?: number } };
 
@@ -89,6 +114,113 @@ function EqBars() {
 	);
 }
 
+/**
+ * 「收藏 / 已屏蔽」清单视图。
+ *
+ * 它存在的理由不只是"列出来"：被屏蔽的歌在检索里**已经搜不到了**（那是过滤的本意），
+ * 所以这里是唯一还能看见它、拿到它 id 的地方 = **解封出口**（§0 红线③）。
+ * 因此三件事不能省：
+ *  ① 每行都要能**播放**（不然"放回来"只是把名字放回来）；
+ *  ② 每行都要能**摘掉标记**；
+ *  ③ `missing`（文件已经不在曲库）的行**照旧列出**，并且说清为什么 ——
+ *     静默丢掉它，用户会以为自己记错了。
+ */
+function FlagList({
+	kind,
+	rows,
+	loading,
+	error,
+	currentId,
+	onPlay,
+	onRemove,
+}: {
+	kind: FlagKind;
+	rows: FlagRow[];
+	loading: boolean;
+	error: string | null;
+	currentId?: string;
+	onPlay: (id: string) => void;
+	onRemove: (id: string) => void;
+}) {
+	const label = FLAG_LABEL[kind];
+	// 四态，顺序与 `list-phase.ts` 同源：error → loading → empty → list。
+	const phase = listPhase({ loaded: !loading, error, items: rows });
+
+	if (phase.kind === 'error') {
+		return (
+			<div className="flex h-full flex-col items-center justify-center gap-2 text-muted">
+				<span className="text-3xl opacity-60">⚠️</span>
+				<p className="text-sm">{error}</p>
+				<p className="px-6 text-center text-[10px] text-muted/70">
+					清单没有空，只是这一下没读到 —— 重开一次曲库试试
+				</p>
+			</div>
+		);
+	}
+	if (phase.kind === 'loading') {
+		return (
+			<div className="space-y-2">
+				{[0, 1, 2].map((i) => (
+					<div key={i} className="h-11 animate-pulse rounded-lg bg-surface-2" />
+				))}
+			</div>
+		);
+	}
+	if (phase.kind === 'empty') {
+		return (
+			<div className="flex h-full flex-col items-center justify-center gap-2 text-muted">
+				<span className="text-3xl opacity-60">{kind === 'favorite' ? '♥' : '⊘'}</span>
+				<p className="text-sm">还没有{label.name}任何曲目</p>
+				<p className="px-6 text-center text-[10px] text-muted/70">
+					{kind === 'favorite'
+						? '在「曲库」里点卡片上的 ♥，或对助手说「这首不错，收藏一下」'
+						: `在「曲库」里点卡片上的 ⊘，或对助手说「这首以后别放了」`}
+				</p>
+			</div>
+		);
+	}
+
+	return (
+		<ul className="space-y-1.5">
+			{phase.items.map((row) => (
+				<li
+					key={row.trackId}
+					className="flex items-center gap-2 rounded-lg border border-border px-2 py-1.5"
+				>
+					<button
+						type="button"
+						onClick={() => onPlay(row.trackId)}
+						disabled={row.missing}
+						aria-label={row.missing ? `${row.title}（文件已不在曲库，放不了）` : `播放 ${row.title}`}
+						title={row.missing ? '文件已经不在曲库里了' : '播放'}
+						className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-foreground/75 transition hover:bg-surface-2 hover:text-foreground disabled:opacity-30"
+					>
+						<PlayIcon size={14} />
+					</button>
+					<div className="min-w-0 flex-1">
+						<div
+							className={`truncate text-sm ${row.trackId === currentId ? 'text-brand' : 'text-foreground'}`}
+						>
+							{row.title}
+						</div>
+						<div className="truncate text-[10px] text-muted">
+							{row.missing ? '文件已不在曲库（可能改过名或被移走）' : row.artist}
+						</div>
+					</div>
+					<button
+						type="button"
+						onClick={() => onRemove(row.trackId)}
+						aria-label={`${label.undone}：${row.title}`}
+						className="shrink-0 rounded-full border border-border px-2 py-1 text-[10px] text-muted transition hover:bg-surface-2 hover:text-foreground"
+					>
+						{kind === 'favorite' ? '取消收藏' : '恢复'}
+					</button>
+				</li>
+			))}
+		</ul>
+	);
+}
+
 export function LibraryGrid() {
 	const snap = usePlayerSnapshot();
 	const [open, setOpen] = useState(false);
@@ -104,6 +236,19 @@ export function LibraryGrid() {
 	const [notice, setNotice] = useState<string | null>(null);
 	const [editing, setEditing] = useState<Editing | null>(null);
 	const [saving, setSaving] = useState(false);
+	const [tab, setTab] = useState<'all' | FlagKind>('all');
+	/** 「收藏 / 已屏蔽」两个视图的数据。**只在切到那个视图时才取**（整库视图用不到）。 */
+	const [flagRows, setFlagRows] = useState<FlagRow[]>([]);
+	const [flagLoading, setFlagLoading] = useState(false);
+	const [flagError, setFlagError] = useState<string | null>(null);
+	/**
+	 * 分组维度。`null` = 不分组（平铺网格 + 搜索）。
+	 *
+	 * ⚠️ **分组态下搜索框必须禁用**（`contract/library-groups.ts` 文件头）：
+	 * 搜索结果是「平铺的一页」，分组是「整库的全部分桶」，两者同时生效时
+	 * 「共 N 组」其实是「这一页里出现了 N 组」—— 每个数字都在撒谎。
+	 */
+	const [groupBy, setGroupBy] = useState<GroupBy | null>(null);
 	const inputRef = useRef<HTMLInputElement>(null);
 
 	// Esc 关闭（与聊天/队列/快捷键面板的 Esc 处理并存：同时打开时会被一起关掉）
@@ -157,6 +302,32 @@ export function LibraryGrid() {
 	}, [query, open]);
 	/* eslint-enable react-hooks/set-state-in-effect */
 
+	// 「收藏 / 已屏蔽」两个视图：切过去时取一次清单
+	/* eslint-disable react-hooks/set-state-in-effect */
+	useEffect(() => {
+		if (!open || tab === 'all') return;
+		let cancelled = false;
+		setFlagLoading(true);
+		void (async () => {
+			try {
+				const rows = await fetchFlagRows(tab);
+				if (cancelled) return;
+				setFlagRows(rows);
+				setFlagError(null);
+			} catch {
+				// 与整库那一侧同一条规则：**读不到不等于空了**。这里多一层要紧 ——
+				// 「读不到屏蔽清单」意味着解封出口暂时没了，而这不能显示成「你什么都没屏蔽」。
+				if (!cancelled) setFlagError(`读不到${FLAG_LABEL[tab].name}清单`);
+			} finally {
+				if (!cancelled) setFlagLoading(false);
+			}
+		})();
+		return () => {
+			cancelled = true;
+		};
+	}, [tab, open]);
+	/* eslint-enable react-hooks/set-state-in-effect */
+
 	/**
 	 * 四态。**顺序与 `list-phase.ts` 同源**：`error` 先于 `empty`。
 	 *
@@ -179,6 +350,39 @@ export function LibraryGrid() {
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({ trackId: id }),
 		}).catch(() => {});
+	};
+
+	/**
+	 * 写一次收藏 / 屏蔽。
+	 *
+	 * 写入后**本地跟着改一处**，而不是整页重取：屏蔽一首歌不该把翻到第三页的
+	 * 列表打回第一页。改的那一处与服务端语义一致 —— 屏蔽 = 它从可见曲库里消失
+	 * （所以从 `songs` 里去掉、`total` 减一）；解除屏蔽 = 它从屏蔽清单里消失。
+	 * **收藏不改 `songs`**：❤ 的颜色由 SSE 快照的 `favoriteIds` 决定，本机不存一份。
+	 */
+	const writeFlag = async (kind: FlagKind, trackId: string, on: boolean) => {
+		const action = on ? FLAG_LABEL[kind].verb : FLAG_LABEL[kind].undone;
+		setNotice(null);
+		try {
+			const { rows } = await postFlag(kind, trackId, on);
+			if (kind === 'hidden' && on) {
+				setSongs((prev) => prev.filter((s) => s.id !== trackId));
+				setTotal((t) => Math.max(0, t - 1));
+				// 正在改标签的那首被屏蔽了 → 收掉编辑条（它已经不在这一页了）
+				setEditing((cur) => (cur?.songId === trackId ? null : cur));
+			}
+			if (tab === kind) setFlagRows(rows);
+		} catch (err) {
+			setNotice(
+				failureNote(
+					action,
+					err instanceof FlagError ? err.status : null,
+					// 收藏 / 屏蔽是「人的偏好」，没写进去 = 它还是老样子。把处境说出来，
+					// 否则用户以为点到了、其实是失败了。
+					on ? '' : '—— 它还在清单里。',
+				),
+			);
+		}
 	};
 
 	const loadMore = async () => {
@@ -327,9 +531,12 @@ export function LibraryGrid() {
 									ref={inputRef}
 									value={query}
 									onChange={(e) => setQuery(e.target.value)}
-									placeholder="搜索歌名、歌手、专辑…"
+									placeholder={groupBy ? '分组浏览时不能搜索' : '搜索歌名、歌手、专辑…'}
 									aria-label="搜索曲库"
-									className="w-full rounded-full border border-border bg-surface-2 py-1.5 pl-9 pr-3 text-sm text-foreground outline-none transition placeholder:text-muted/70 focus:border-brand/50"
+									// 分组态禁用而不是"照样能输"：输进去之后界面上每一句
+									// 「共 N 组」都会变成「这一页里出现了 N 组」。
+									disabled={groupBy !== null}
+									className="w-full rounded-full border border-border bg-surface-2 py-1.5 pl-9 pr-3 text-sm text-foreground outline-none transition placeholder:text-muted/70 focus:border-brand/50 disabled:opacity-45"
 								/>
 							</div>
 							{/* 计数取服务端的 `total`。**这不是装饰**：早先这里写的是
@@ -352,15 +559,103 @@ export function LibraryGrid() {
 							</button>
 						</div>
 
+						{/* 视图切换。**「收藏 / 已屏蔽」必须能点到** —— 被屏蔽的歌在检索里
+						    搜不到了，只有这两个视图还能看见它们、拿得到 id。 */}
+						<div className="flex shrink-0 items-center gap-1 border-b border-border px-4 py-1.5">
+							{TABS.map((t) => {
+								const on = tab === t.key;
+								// 计数只在**已经取到**时显示：没取到时写「0」是在把
+								// 「读不到」说成「没有」（与 `list-phase.ts` 同一条规则）。
+								const count =
+									t.key === 'all'
+										? loaded && total > 0
+											? total
+											: null
+										: tab === t.key && !flagLoading && !flagError
+											? flagRows.length
+											: null;
+								return (
+									<button
+										key={t.key}
+										type="button"
+										onClick={() => setTab(t.key)}
+										aria-current={on ? 'true' : undefined}
+										className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+											on
+												? 'bg-brand-soft text-brand'
+												: 'text-muted hover:bg-surface-2 hover:text-foreground'
+										}`}
+									>
+										{t.label}
+										{count === null ? '' : `（${count}）`}
+									</button>
+								);
+							})}
+						</div>
+
+						{/* 分组维度。**只在「曲库」视图下有意义**（收藏 / 屏蔽是清单，不是整库）。 */}
+						{tab === 'all' && (
+							<div className="flex shrink-0 items-center gap-1 border-b border-border px-4 py-1.5">
+								<span className="mr-0.5 text-[10px] text-muted/70">按</span>
+								<button
+									type="button"
+									onClick={() => setGroupBy(null)}
+									aria-current={groupBy === null ? 'true' : undefined}
+									className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+										groupBy === null
+											? 'bg-brand-soft text-brand'
+											: 'text-muted hover:bg-surface-2 hover:text-foreground'
+									}`}
+								>
+									不分组
+								</button>
+								{GROUP_BY.map((by) => (
+									<button
+										key={by}
+										type="button"
+										onClick={() => setGroupBy(by)}
+										aria-current={groupBy === by ? 'true' : undefined}
+										className={`rounded-full px-2.5 py-1 text-[11px] transition ${
+											groupBy === by
+												? 'bg-brand-soft text-brand'
+												: 'text-muted hover:bg-surface-2 hover:text-foreground'
+										}`}
+									>
+										{GROUP_BY_LABEL[by]}
+									</button>
+								))}
+							</div>
+						)}
+
 						{notice && (
 							<p className="shrink-0 border-b border-border bg-red-400/10 px-4 py-1.5 text-[10px] leading-snug text-red-400">
 								{notice}
 							</p>
 						)}
 
-						{/* 网格 */}
+						{/* 网格 / 清单 */}
 						<div className="scroll-area min-h-0 flex-1 overflow-y-auto p-4">
-							{phase.kind === 'error' ? (
+							{tab === 'all' && groupBy !== null ? (
+								// `key={groupBy}`：**换维度就整个换一个实例**，于是展开态自然回到
+								// 分组清单那一层。旧维度下的 key 在新维度里多半不存在，
+								// 留着一个指向别的东西的展开态 = 用户在看什么都说不清。
+								<LibraryGroups
+									key={groupBy}
+									by={groupBy}
+									currentId={snap.currentTrack?.id}
+									onPlay={playSong}
+								/>
+							) : tab !== 'all' ? (
+								<FlagList
+									kind={tab}
+									rows={flagRows}
+									loading={flagLoading}
+									error={flagError}
+									currentId={snap.currentTrack?.id}
+									onPlay={playSong}
+									onRemove={(id) => void writeFlag(tab, id, false)}
+								/>
+							) : phase.kind === 'error' ? (
 								<div className="flex h-full flex-col items-center justify-center gap-2 text-muted">
 									<span className="text-3xl opacity-60">⚠️</span>
 									<p className="text-sm">读不到曲库</p>
@@ -384,8 +679,10 @@ export function LibraryGrid() {
 							) : (
 								<>
 									<div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-										{phase.items.map((song) => {
-											const isCurrent = snap.currentTrack?.id === song.id;
+												{phase.items.map((song) => {
+													const isCurrent = snap.currentTrack?.id === song.id;
+													// 收藏态**从快照算**，与播放条那颗 ❤ 同源（真相在服务端）。
+													const isFav = snap.favoriteIds.includes(song.id);
 											return (
 												<div key={song.id} className="group min-w-0 text-left">
 													<button
@@ -437,31 +734,58 @@ export function LibraryGrid() {
 														</div>
 													</button>
 
-													{/* 标签行 = 改标签的入口。**在播放按钮之外**：
-													    输入框不能嵌在 button 里。始终可见（不做 hover 才出现）——
-													    触摸屏上根本没有 hover，那等于这个入口不存在。 */}
-													<button
-														type="button"
-														onClick={() => openEditor(song)}
-														aria-label={`编辑 ${song.title} 的标签`}
-														title="看 / 改这首歌的风格标签（改过就归你，AI 打标不再覆盖）"
-														className={`mt-1 flex w-full flex-wrap items-center gap-1 rounded-md px-0.5 py-0.5 text-left transition hover:bg-surface-2 ${
-															editing?.songId === song.id ? 'ring-1 ring-brand/60' : ''
-														}`}
-													>
-														{song.tags.length === 0 ? (
-															<span className="text-[10px] text-muted/60">＋ 标签</span>
-														) : (
-															song.tags.map((tag) => (
-																<span
-																	key={tag}
-																	className="rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted"
-																>
-																	{tag}
-																</span>
-															))
-														)}
-													</button>
+													{/* 卡片的操作行 = 改标签 / 收藏 / 屏蔽。**在播放按钮之外**：
+													    `<button>` 里不能嵌 `<button>`（嵌套可交互元素是无效 HTML，
+													    点击该算谁的说不清）。三个入口**常驻可见** ——
+													    hover 才浮出 = 触摸屏上这个入口不存在。 */}
+													<div className="mt-1 flex items-center gap-0.5">
+														<button
+															type="button"
+															onClick={() => openEditor(song)}
+															aria-label={`编辑 ${song.title} 的标签`}
+															title="看 / 改这首歌的风格标签（改过就归你，AI 打标不再覆盖）"
+															className={`min-w-0 flex-1 flex-wrap items-center gap-1 rounded-md px-0.5 py-0.5 text-left transition hover:bg-surface-2 ${
+																editing?.songId === song.id ? 'flex ring-1 ring-brand/60' : 'flex'
+															}`}
+														>
+															{song.tags.length === 0 ? (
+																<span className="text-[10px] text-muted/60">＋ 标签</span>
+															) : (
+																song.tags.map((tag) => (
+																	<span
+																		key={tag}
+																		className="rounded-full bg-surface-2 px-1.5 py-0.5 text-[10px] text-muted"
+																	>
+																		{tag}
+																	</span>
+																))
+															)}
+														</button>
+														{/* ❤ 的颜色从快照算（真相在服务端），点击只发一次 POST */}
+														<button
+															type="button"
+															onClick={() => void writeFlag('favorite', song.id, !isFav)}
+															aria-label={isFav ? `取消收藏 ${song.title}` : `收藏 ${song.title}`}
+															aria-pressed={isFav}
+															title={isFav ? '取消收藏' : '收藏'}
+															className={`shrink-0 rounded-md p-1 transition hover:bg-surface-2 ${
+																isFav ? 'text-brand' : 'text-muted hover:text-foreground'
+															}`}
+														>
+															{isFav ? <FavOnIcon size={13} /> : <FavIcon size={13} />}
+														</button>
+														{/* ⊘ = 屏蔽的**写入口**。读侧过滤在服务端，
+														    没有这一半就是「只能过滤、没法操作」。 */}
+														<button
+															type="button"
+															onClick={() => void writeFlag('hidden', song.id, true)}
+															aria-label={`屏蔽 ${song.title}`}
+															title="以后别再自动给我放这首（可在「已屏蔽」里恢复）"
+															className="shrink-0 rounded-md p-1 text-muted transition hover:bg-surface-2 hover:text-foreground"
+														>
+															<BlockIcon size={13} />
+														</button>
+													</div>
 												</div>
 											);
 										})}

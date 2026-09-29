@@ -21,7 +21,7 @@ import { DEFAULT_VOLUME, getPlayerState, getSnapshot, setQueueAndPlay } from './
 
 const snap = (over: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
 	state: 'playing',
-	currentTrack: { id: 'B.mp3', title: '自由飞翔', artist: '凤凰传奇', album: 'x', hasCover: true },
+	currentTrack: { id: 'B.mp3', title: '自由飞翔', artist: '凤凰传奇', album: 'x', hasCover: true, hasVideo: false },
 	positionSec: 12,
 	queueSize: 3,
 	queueIndex: 1,
@@ -35,6 +35,10 @@ const snap = (over: Partial<PlayerSnapshot> = {}): PlayerSnapshot => ({
 	volume: 0.8,
 	mode: 'seq',
 	shuffle: false,
+	// 人的偏好（服务端权威，见 contract/player.ts）。这个夹具里恒为空 ——
+	// 本文件测的是「字段各认哪个来源」，不是标记本身。
+	favoriteIds: [],
+	hiddenIds: [],
 	...over,
 });
 
@@ -57,7 +61,7 @@ test('服务端权威的字段以服务端为准：浏览器那份说反了也�
 	// 这一条就是「绕一圈」的修复：那一圈只会丢信息，所以权威的一方不该当乘客。
 	const device = snap({
 		state: 'paused',
-		currentTrack: { id: 'A.mp3', title: '荷塘月色', artist: '凤凰传奇', album: 'y', hasCover: true },
+		currentTrack: { id: 'A.mp3', title: '荷塘月色', artist: '凤凰传奇', album: 'y', hasCover: true, hasVideo: false },
 		queueIndex: 0,
 		queueSize: 1,
 		queue: [{ id: 'A.mp3', title: '荷塘月色', artist: '凤凰传奇' }],
@@ -136,6 +140,7 @@ test('promptSnapshot：读的是当下的服务端状态，不是某处缓存', 
 				filePath: '/B.mp3',
 				hasLyrics: true,
 				hasCover: true,
+				videoPath: null,
 			},
 		],
 		{ label: '安静的歌' },

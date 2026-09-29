@@ -11,7 +11,8 @@
  *  - 进度监听 'player-time' / 'player-duration'（APlayerPlayer timeupdate 广播），
  *    拖动/点击 → requestSeek(sec) → APlayerPlayer 调 ap.seek，不新增后端 API。
  *  - 音量 → requestVolume(0-1) → APlayerPlayer 设 ap.audio.volume（纯前端）。
- *  - 收藏 → toggleFavorite（localStorage + player-favorites 事件同步各处 UI）。
+ *  - 收藏 → postFlag（HTTP 写服务端）。❤ 的颜色**从快照算**（`snap.favoriteIds`），
+ *    本机不存一份 —— 收藏是人的偏好，真相在服务端；SSE 推下来后三个入口同时变。
  *  - 上一首：进度 >3s 先回到 0；否则 jump(queueIndex-1)，队首循环到末尾
  *    （复用既有 /api/player/jump，无需后端改动）。
  */
@@ -22,7 +23,6 @@ import {
 	PLAYBACK_MODES,
 	PLAYER_EVENTS,
 	fmtTime,
-	isFavorite,
 	loadMode,
 	loadShuffle,
 	loadVolume,
@@ -32,9 +32,9 @@ import {
 	requestVolume,
 	saveMode,
 	saveVolume,
-	toggleFavorite,
 	type PlaybackMode,
 } from './player-events';
+import { postFlag } from './flag-client';
 import type { JSX } from 'react';
 import { TrackCover } from './TrackCover';
 import {
@@ -71,7 +71,6 @@ export function PlayerBar({ onToggleQueue }: { onToggleQueue?: () => void }) {
 	const [position, setPosition] = useState(0);
 	const [duration, setDuration] = useState(0);
 	const [volume, setVolume] = useState(0.8);
-	const [liked, setLiked] = useState(false);
 	const [dragging, setDragging] = useState(false);
 	const [mode, setMode] = useState<PlaybackMode>('seq');
 	const [shuffleOn, setShuffleOn] = useState(false);
@@ -101,13 +100,13 @@ export function PlayerBar({ onToggleQueue }: { onToggleQueue?: () => void }) {
 		};
 	}, []);
 
-	// 切歌：重置进度 + 同步收藏状态
+	// 切歌：重置进度。❤ **不在这里同步** —— 它从快照算（下面 `liked`），
+	// 而快照由 SSE 推下来，agent 在别处改收藏时这颗心也会跟着变。
 	/* eslint-disable react-hooks/set-state-in-effect */
 	useEffect(() => {
 		posRef.current = 0;
 		setPosition(0);
 		setDuration(0);
-		setLiked(isFavorite(track?.id));
 	}, [track?.id]);  
 	/* eslint-enable react-hooks/set-state-in-effect */
 
@@ -210,10 +209,25 @@ export function PlayerBar({ onToggleQueue }: { onToggleQueue?: () => void }) {
 		}
 	}, [snap.queue.length, snap.queueIndex, jumpTo]);
 
+	/**
+	 * 收藏态**从快照算**，不在本机留一份（理由见 `flag-client.ts` 文件头：
+	 * 收藏是人的偏好，真相在服务端）。于是不需要「切歌时同步 ❤」这类代码 ——
+	 * 少一处要记的同步点。
+	 */
+	const liked = Boolean(track) && snap.favoriteIds.includes(track?.id ?? '');
+
+	/**
+	 * 点 ❤ → 只发一次 POST。**不先变色**：乐观更新是在报告一件还没发生的事，
+	 * 失败时用户已经记住「我收藏过了」，而它其实没成。这里失败的表现是「没变色」，
+	 * 而再点一次就是重试 —— 播放条上没有地方放一句提示，这已经是最诚实的形状。
+	 */
 	const toggleLike = useCallback(() => {
 		if (!track) return;
-		setLiked(toggleFavorite(track.id).includes(track.id));
-	}, [track]);
+		const on = !snap.favoriteIds.includes(track.id);
+		postFlag('favorite', track.id, on).catch((err) => {
+			console.warn('[PlayerBar] 收藏没写进去：', err);
+		});
+	}, [track, snap.favoriteIds]);
 
 	// ── 进度条拖动（Pointer Events，capture 保证移出条外仍跟踪） ──
 	// 关键：几何计算一律基于被交互元素自身（e.currentTarget），不用共享 ref。

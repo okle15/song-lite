@@ -11,6 +11,9 @@
  *  - 随机播放 = jump 到随机索引（排除当前）。
  *  - 播放模式 = requestMode 写 localStorage + 'player-mode' 事件；
  *    APlayerPlayer 在 'ended' 时按模式决定自动连播行为。
+ *
+ * 封面位不是死的：曲目有**同名伴生视频**时那块 128px 方块渲染成 `<video>`
+ * （见 `components/TrackVideo.tsx`）。两者共用同一个 `coverBoxCls`，尺寸不会漂。
  */
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -27,6 +30,7 @@ import {
 	type PlaybackMode,
 } from './player-events';
 import { TrackCover } from './TrackCover';
+import { TrackVideo } from './TrackVideo';
 import { gradientFor } from '@/components/cover';
 import {
 	ListLoopIcon,
@@ -51,6 +55,16 @@ export function NowPlaying() {
 	// 封面配色与曲库卡片 / 全屏歌词同源：同一首歌三处颜色恒定（素材感知封面）
 	const coverCls = track ? gradientFor(track.id) : 'from-brand to-brand-3';
 	const isPlaying = snap.state === 'playing';
+	/**
+	 * 英雄卡那个 128px 方块的尺寸 / 过渡。
+	 *
+	 * 抽成一份是因为它现在有**两个**渲染者：封面（`TrackCover`）与伴生视频
+	 * （`TrackVideo`）。各写一遍的后果是「有视频的那几首歌」尺寸与其它曲目
+	 * 差一档 —— 切歌时整块卡片会跳一下，看着像卡顿，而没有任何东西会报错。
+	 */
+	const coverBoxCls = `h-32 w-32 rounded-3xl font-bold transition-transform duration-500 ${
+		isPlaying ? 'shadow-[0_16px_40px_-12px] shadow-brand/60' : 'scale-95 shadow-md'
+	}`;
 
 	const [position, setPosition] = useState(0);
 	const [duration, setDuration] = useState(0);
@@ -206,15 +220,26 @@ export function NowPlaying() {
 			/>
 
 			<div className="relative p-5">
-				{/* 渐变大封面 + 旋转黑胶角标 */}
+				{/* 渐变大封面 + 旋转黑胶角标。**有伴生视频时这块地方给视频** ——
+				    视频是这首歌的一个表面，不是一个新页面（见 components/TrackVideo.tsx） */}
 				<div className="relative mx-auto w-fit">
-					<TrackCover
-						id={track.id}
-						title={track.title}
-						hasCover={track.hasCover}
-						className={`h-32 w-32 rounded-3xl font-bold transition-transform duration-500 ${isPlaying ? 'shadow-[0_16px_40px_-12px] shadow-brand/60' : 'scale-95 shadow-md'}`}
-						charClassName="text-5xl text-white"
-					/>
+					{track.hasVideo ? (
+						<TrackVideo
+							id={track.id}
+							title={track.title}
+							hasCover={track.hasCover}
+							className={coverBoxCls}
+							charClassName="text-5xl text-white"
+						/>
+					) : (
+						<TrackCover
+							id={track.id}
+							title={track.title}
+							hasCover={track.hasCover}
+							className={coverBoxCls}
+							charClassName="text-5xl text-white"
+						/>
+					)}
 					<div
 						className={`absolute -bottom-1.5 -right-1.5 flex h-9 w-9 items-center justify-center rounded-full border border-border bg-surface-3 text-sm shadow-sm ${isPlaying ? 'animate-[spin_3s_linear_infinite]' : ''}`}
 						aria-hidden

@@ -8,11 +8,11 @@
  *  - player-volume   (detail: number 0-1)  任意组件改音量（APlayerPlayer 监听）
  *  - player-mode     (detail: PlaybackMode) 循环模式变化（仅顺序 / 列表 / 单曲三种）
  *  - player-shuffle  (detail: boolean)      切歌时随机选下一首的独立 toggle
- *  - player-favorites (detail: string[])   收藏集合变化（多控件 UI 同步）
  *  - lyrics-fullscreen (detail: none)      请求开/关全屏歌词沉浸页
  *                                          （GlobalHotkeys 的 F 键派发，LyricsPanel 监听）
  *
- * 本地偏好存 localStorage（音量 / 播放模式 / 随机 / 收藏），APlayerPlayer 初始化时读取。
+ * 本地偏好存 localStorage（音量 / 播放模式 / 随机），APlayerPlayer 初始化时读取。
+ * ⚠️ **收藏 / 屏蔽不在此列** —— 它们是人的偏好，真相在服务端（见下方说明）。
  * 键名统一取自 storage-keys（带项目命名空间，避免与 song 互相覆盖）。
  *
  * ── 音量与播放方式：本机是真相，服务端是镜像（2026-09-17 加）────────────
@@ -36,7 +36,6 @@ export const PLAYER_EVENTS = {
 	volume: 'player-volume',
 	mode: 'player-mode',
 	shuffle: 'player-shuffle',
-	favorites: 'player-favorites',
 	lyricsFullscreen: 'lyrics-fullscreen',
 } as const;
 
@@ -62,7 +61,6 @@ export const PLAYBACK_MODES: PlaybackModeSpec[] = [
 /** 本模块用到的存储键；值统一来自 storage-keys。 */
 const KEYS = {
 	volume: LS_KEYS.volume,
-	favorites: LS_KEYS.favorites,
 	mode: LS_KEYS.mode,
 	shuffle: LS_KEYS.shuffle,
 } as const;
@@ -114,31 +112,20 @@ export function saveShuffle(on: boolean): void {
 	window.localStorage.setItem(KEYS.shuffle, on ? 'on' : '');
 }
 
-export function loadFavorites(): string[] {
-	if (typeof window === 'undefined') return [];
-	try {
-		const raw = window.localStorage.getItem(KEYS.favorites);
-		const arr = raw ? (JSON.parse(raw) as unknown) : [];
-		return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : [];
-	} catch {
-		return [];
-	}
-}
-
-/** 切换收藏并广播 player-favorites 事件。返回最新收藏集合。 */
-export function toggleFavorite(trackId: string): string[] {
-	const ids = loadFavorites();
-	const next = ids.includes(trackId) ? ids.filter((id) => id !== trackId) : [...ids, trackId];
-	if (typeof window !== 'undefined') {
-		window.localStorage.setItem(KEYS.favorites, JSON.stringify(next));
-		window.dispatchEvent(new CustomEvent<string[]>(PLAYER_EVENTS.favorites, { detail: next }));
-	}
-	return next;
-}
-
-export function isFavorite(trackId: string | undefined): boolean {
-	return Boolean(trackId) && loadFavorites().includes(trackId as string);
-}
+/*
+ * ── 收藏 / 屏蔽**不在这里**（2026-09-28 搬走）─────────────────────────
+ * 这里原本有 `loadFavorites` / `toggleFavorite` / `isFavorite` 三个函数，
+ * 它们把收藏当作「本机偏好」存 `localStorage`。那是错的：收藏与屏蔽是
+ * **人的偏好**，不是**设备的事实** —— 存本机的后果是服务端与 agent 完全
+ * 看不见它（判据见 `contract/library-flags.ts` 文件头）。
+ *
+ * 现在读写都走 `./flag-client.ts`（HTTP → 路由 → 库），界面一律从快照的
+ * `favoriteIds` / `hiddenIds` 渲染，由 SSE 推下来。于是本文件里剩下的
+ * `volume` / `mode` / `shuffle` 正好就是「设备侧真相」那一类 —— 分类清楚了。
+ *
+ * `PLAYER_EVENTS.favorites`（曾由 `toggleFavorite` 广播）也一并删了：
+ * 从来没有人监听它，而同步多控件 UI 这件事现在由 SSE 快照承担。
+ */
 
 /* ── 与 BFF 的同步：上报（本机 → 服务端）与应用（服务端 → 本机）────────── */
 

@@ -49,6 +49,38 @@ export function recordPlay(
 	}
 }
 
+/**
+ * 一首歌的播放统计（给「曲库体检 / 单曲详情」用）。
+ *
+ * 放在**这里**而不是各个读侧各写一条 SQL：`plays` 只有本文件一个读写点
+ * （`AGENTS.md` 的目录约定），多一处就多一处漂移。
+ *
+ * 读失败回 `null`（不是 0）：播放次数读不出来 ≠ 这首歌一次都没播过。
+ * 与 `first_token_ms` 用 NULL 不用 0 是同一条 —— **0 是一个结论，null 是不知道**。
+ */
+export function playStatsFor(trackId: string): PlayStats | null {
+	try {
+		const row = getDb()
+			.prepare(
+				'SELECT COUNT(*) AS count, MAX(started_at) AS last FROM plays WHERE track_id = ?',
+			)
+			.get(trackId) as unknown as { count: number; last: string | null } | undefined;
+		if (!row) return null;
+		return { count: Number(row.count), lastPlayedAt: row.last };
+	} catch (err) {
+		console.error('[play-log] failed to read play stats:', err);
+		return null;
+	}
+}
+
+/** 一首歌的播放统计。 */
+export type PlayStats = {
+	/** 播过几次。 */
+	count: number;
+	/** 最近一次是什么时候播的。**null = 从没播过**（不是"不知道"）。 */
+	lastPlayedAt: string | null;
+};
+
 /** 最近 N 次播放，新的在前。`limit` 夹紧在 1..200，非法值回落 20。 */
 export function recentPlays(limit = 20): PlayRow[] {
 	const parsed = Math.trunc(limit);

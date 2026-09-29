@@ -7,6 +7,9 @@
  *
  * 打开方式：歌词面板右上角的「⤢」按钮，或快捷键 F（由 GlobalHotkeys 派发 lyrics-fullscreen）。
  * 关闭：右上角 × 或 Esc。打开时锁定 body 滚动。
+ *
+ * 曲目有**同名伴生视频**时，顶栏会多一颗「歌词 / 视频」开关（见 `components/TrackVideo.tsx`）——
+ * 沉浸页是唯一能把画面放到足够大的地方，所以这个开关只在这里。
  */
 'use client';
 import { useEffect, useRef, useState } from 'react';
@@ -16,10 +19,11 @@ import {
 	PLAYER_EVENTS,
 	fmtTime,
 	requestSeek,
-	toggleFavorite,
 } from './player-events';
+import { postFlag } from './flag-client';
 import { useEscapeToClose } from './use-escape-to-close';
 import { gradientFor } from '@/components/cover';
+import { TrackVideo } from './TrackVideo';
 import {
 	CloseIcon,
 	FavIcon,
@@ -28,6 +32,7 @@ import {
 	PauseIcon,
 	PlayIcon,
 	PrevIcon,
+	VideoIcon,
 } from './icons';
 
 export function FullscreenLyrics({ open, onClose }: { open: boolean; onClose: () => void }) {
@@ -37,7 +42,16 @@ export function FullscreenLyrics({ open, onClose }: { open: boolean; onClose: ()
 	useScrollActiveIntoView(listRef, activeIdx);
 
 	const [duration, setDuration] = useState(0);
-	const [fav, setFav] = useState(false);
+	/**
+	 * 沉浸页要显示**歌词**还是**视频**。
+	 *
+	 * 为什么这里才有这个开关（英雄卡上没有）：英雄卡那块 128px 方块太小，
+	 * 视频与封面在那里就是同一个东西；这个铺满整屏的页面才是"看画面"的地方。
+	 * 状态留在本组件（不落库、不进快照）：它是**这份视图**的选择，不是
+	 * 「人的偏好」（判据见 `contract/library-flags.ts` 文件头）——换个客户端
+	 * 再打开，凭什么要接着你上一台设备的视图状态。
+	 */
+	const [showVideo, setShowVideo] = useState(false);
 	const dialogRef = useRef<HTMLDivElement>(null);
 
 	// 无障碍：打开时把焦点移入对话框、Tab 锁在内部、关闭后焦点回弹到触发元素。
@@ -107,6 +121,14 @@ export function FullscreenLyrics({ open, onClose }: { open: boolean; onClose: ()
 	const pos = snap.positionSec;
 	const progress = duration > 0 ? Math.min(1, pos / duration) : 0;
 	const isPlaying = snap.state === 'playing';
+	/**
+	 * 真的显示视频吗 —— **两个条件都要**：用户按了开关，且这一首确实有伴生视频。
+	 *
+	 * 只看开关的话，切到一首没有视频的歌时会留一块黑框（`TrackVideo` 的 `onError`
+	 * 得等请求回来才回落封面，中间那段时间界面是黑的 —— 一个"什么也没发生"
+	 * 的空窗，比直接显示歌词难查）。
+	 */
+	const videoOn = showVideo && snap.currentTrack?.hasVideo === true;
 
 	const post = (url: string) => fetch(url, { method: 'POST' }).catch(() => {});
 
@@ -117,10 +139,17 @@ export function FullscreenLyrics({ open, onClose }: { open: boolean; onClose: ()
 		requestSeek(ratio * duration);
 	};
 
+	/**
+	 * 与播放条那颗 ❤ **同一条路、同一个真相**：`fav` 从快照算、点击只发一次 POST
+	 * （见 `flag-client.ts` 文件头）。早先这里 `setFav(!v)` 先变色再发请求 ——
+	 * 那是乐观更新，失败时界面已经说「收藏过了」，而库里其实没有。
+	 */
+	const fav = Boolean(track) && snap.favoriteIds.includes(track?.id ?? '');
 	const toggleFav = () => {
 		if (!track) return;
-		setFav((v) => !v);
-		toggleFavorite(track.id);
+		postFlag('favorite', track.id, !fav).catch((err) => {
+			console.warn('[FullscreenLyrics] 收藏没写进去：', err);
+		});
 	};
 
 	const btn =
@@ -145,8 +174,19 @@ export function FullscreenLyrics({ open, onClose }: { open: boolean; onClose: ()
 				className={`pointer-events-none absolute -bottom-24 right-1/4 h-96 w-96 rounded-full bg-gradient-to-br opacity-40 blur-[120px] ${gradientFor(track?.id ?? '')}`}
 			/>
 
-			{/* 顶栏：右上角关闭 */}
-			<header className="relative z-10 flex items-center justify-end p-4 sm:p-6">
+			{/* 顶栏：右上是「歌词 / 视频」开关（只有这首有伴生视频时才出现）+ 关闭 */}
+			<header className="relative z-10 flex items-center justify-end gap-2 p-4 sm:p-6">
+				{snap.currentTrack?.hasVideo ? (
+					<button
+						type="button"
+						onClick={() => setShowVideo((v) => !v)}
+						aria-label={videoOn ? '显示歌词' : '显示视频'}
+						aria-pressed={videoOn}
+						className={`${btn} ${videoOn ? 'bg-brand/20 text-brand' : ''}`}
+					>
+						<VideoIcon size={24} />
+					</button>
+				) : null}
 				<button type="button" onClick={onClose} aria-label="关闭全屏歌词" className={btn}>
 					<CloseIcon size={24} />
 				</button>
@@ -161,7 +201,20 @@ export function FullscreenLyrics({ open, onClose }: { open: boolean; onClose: ()
 					</div>
 				)}
 
-				{!track ? (
+				{videoOn && track ? (
+					// 画面铺满歌词那块地方（`.lyric-scroll` 的同一格）。
+					// `fit="contain"`：全屏时把画面两侧裁掉比留黑边难看得多。
+					// 画面**不接手播放** —— 底栏那三颗键仍是唯一入口（见 TrackVideo 文件头）。
+					<div className="min-h-0 flex-1 px-4 pb-2 sm:px-8">
+						<TrackVideo
+							id={track.id}
+							title={track.title}
+							hasCover={snap.currentTrack?.hasCover ?? false}
+							fit="contain"
+							className="h-full w-full rounded-2xl"
+						/>
+					</div>
+				) : !track ? (
 					<div className="flex flex-1 flex-col items-center justify-center gap-2 text-white/50">
 						<span className="text-3xl opacity-60">🎶</span>
 						<p className="text-sm">播放一首歌，歌词会在这里沉浸展示</p>

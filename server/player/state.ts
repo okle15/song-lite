@@ -21,9 +21,15 @@
  *   - `'library'`（默认）：行为与从前完全一致；
  *   - `'custom'` ：`setQueueAndPlay` 换来的一批，`ensureQueue` 会**主动让路**。
  * 一个字段的代价，换来「按条件组队列」这件事在状态层成立。
+ *
+ * ── 队列的第三件写：用户去掉一首（2026-09-28）────────────────────────────
+ * 队列卡上的 × → `removeFromQueue`。它是**唯一一件不改变「现在在播什么」的队列写**
+ * （除非去掉的正是当前那首）：另两件写要么换曲（`setQueueAndPlay` / `playTrack`）、
+ * 要么整批重排（`ensureQueue`）。三条语义都写在该函数的注释里。
  */
 import { EventEmitter } from 'node:events';
 import { getSongs, type Song } from '../library';
+import { listFlagIds } from '../library/flags';
 import type { PlaybackMode, PlayerSnapshot, QueueSource } from '../../contract/player';
 
 export type PlayerState = {
@@ -96,6 +102,8 @@ export function getSnapshot(): PlayerSnapshot {
 					album: currentTrack.album,
 					// 只带布尔不带封面字节（见 contract/player.ts 的说明）。
 					hasCover: currentTrack.hasCover,
+					// 伴生视频同理：只带「有没有」，URL 由前端按 id 拼（见 components/cover.ts）。
+					hasVideo: currentTrack.videoPath !== null,
 				}
 			: null,
 		positionSec,
@@ -107,7 +115,29 @@ export function getSnapshot(): PlayerSnapshot {
 		volume: state.volume,
 		mode: state.mode,
 		shuffle: state.shuffle,
+		// 收藏 / 屏蔽：**现读库**，不是缓存在 state 里的镜像 —— 它们是人的偏好，
+		// 真相在 `favorites` / `hidden` 表，而写它们的路径有两条（界面与 agent 的工具），
+		// 走同一条路由。缓一份到内存里等于多一个可能与库不一致的副本。
+		// 读失败时 `listFlagIds` 返回空数组（fail-open，见 `library/flags.ts`）——
+		// 后果只是「❤ 暂时不亮」，而不是整条 SSE 断掉。
+		favoriteIds: listFlagIds('favorite'),
+		hiddenIds: listFlagIds('hidden'),
 	};
+}
+
+/**
+ * 状态**没变**、但快照里的某个字段变了时，主动再推一次给所有订阅者。
+ *
+ * 目前只有一个调用方：收藏 / 屏蔽的写路由（`app/api/library/{favorites,hidden}`）。
+ * 它们改的不是播放状态，可**外面看到的必须变** —— 三个组件（播放条 ❤、
+ * 全屏歌词 ❤、曲库抽屉的「收藏 / 已屏蔽」视图）都从这一份快照取值。
+ *
+ * 为什么不另开一条 SSE 频道：项目里已经有一条推送路（`/api/player/events`），
+ * 再加一条就是「同一个信息两个入口」，而那种结构迟早各自漂移。这一条与
+ * `setVolume` / `setPlayback` 把设备侧设定推下去的机制**完全相同**。
+ */
+export function publishSnapshot(): void {
+	emitChange();
 }
 
 /**
@@ -290,5 +320,68 @@ export function jumpToIndex(index: number): PlayerState | undefined {
 	state.state = 'playing';
 	emitChange();
 	return state;
+}
+
+/**
+ * 从队列里**去掉一首**（队列卡上的 ×）。返回 `undefined` 表示这首歌本来就不在队列里
+ * —— 调用方据此报 404，**且本函数一个字段都没改**（先查后动）。
+ *
+ * 为什么按 `trackId` 而不是下标：用户点的是「这首歌」。下标是**某一份视图**里的位置，
+ * 而队列会被别处改（agent 换一批、点播追加、曲库变动经 `ensureQueue` 同步），
+ * 每次改动都经 SSE 推一份新列表过去 —— 旧视图上的「第 5 项」很可能已经不是他看到的那首。
+ * 按 id 删最坏是**删不到**（报 404，用户看得见）；按下标删最坏是**删掉另一首歌，而且不报错**。
+ *
+ * 三条必须写明的语义（都是 2026-09-28 加 × 时定下来的）：
+ *
+ * 1. **去掉的不是正在播的那一首 → 播放不受任何影响**：`state` / `currentTrack` /
+ *    `positionSec` 原样，只把 `currentIndex` 往左平移一格（去掉的项在它前面时）。
+ *    漏掉平移，当前位置就指到**别人的行**上：界面上的均衡器跑到别的歌上、
+ *    `next_track` 从错的位置往下走 —— 全程不报错。
+ *
+ * 2. **去掉的就是正在播的那一首 → 跳到原位置上的下一首**（返回值 `started` 就是它，
+ *    调用方据此往 `plays` 记一行：这确实是「开始播了一首」）。它已经是队尾那首时，
+ *    等同「队列放完了」：停止。为什么不是「停下不动」：用户点 × 的意思是「这首我不想听了」，
+ *    停在原地和没删一样；而停止会让他以为自己刚刚点了暂停。
+ *
+ * 3. **从「整个曲库」队列里去掉一项，队列的身份就变成 `'custom'`**。否则下一次点播
+ *    （`play` 路由的 `ensureQueue`）会把去掉的那首**原样找回来** —— 而这一次已经告诉
+ *    用户成功了。两次都不报错，用户只会觉得「删了又回来了」，然后开始不信这个按钮。
+ *    `queueLabel` 保持原样（这里本来就是 null）：它不是「按什么条件挑的一批」，
+ *    只是一个用户改过的队列，没有名字。
+ */
+export function removeFromQueue(trackId: string): { state: PlayerState; started: Song | null } | undefined {
+	const idx = state.queue.findIndex((s) => s.id === trackId);
+	if (idx === -1) return undefined;
+
+	const wasCurrent = idx === state.currentIndex;
+	state.queue = state.queue.filter((_, i) => i !== idx);
+	if (state.queueSource === 'library') state.queueSource = 'custom'; // 语义 3
+
+	let started: Song | null = null;
+	if (state.queue.length === 0) {
+		// 队列空了：与「播完最后一首」同形（见 nextTrack 的收尾分支）
+		state.state = 'stopped';
+		state.currentTrack = null;
+		state.positionSec = 0;
+		state.currentIndex = -1;
+	} else if (wasCurrent) {
+		if (idx >= state.queue.length) {
+			// 去掉的是队尾那首，而它正在播 → 后面没有了（语义 2 的后半）
+			state.state = 'stopped';
+			state.currentTrack = null;
+			state.positionSec = 0;
+			state.currentIndex = -1;
+		} else {
+			state.currentIndex = idx; // 原位置现在就是「下一首」
+			state.currentTrack = state.queue[idx];
+			state.positionSec = 0;
+			state.state = 'playing';
+			started = state.currentTrack;
+		}
+	} else if (idx < state.currentIndex) {
+		state.currentIndex -= 1; // 语义 1
+	}
+	emitChange();
+	return { state, started };
 }
 

@@ -17,7 +17,14 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { test } from 'node:test';
 import type { ToolOutcome } from '../contract/tool';
-import { createTools, formatAbsolute, formatPlayTime, summarizeTags } from './tools';
+import {
+	createTools,
+	flagListText,
+	formatAbsolute,
+	formatPlayTime,
+	playlistListText,
+	summarizeTags,
+} from './tools';
 
 type Hit = { method: string; path: string; body: unknown };
 
@@ -220,6 +227,137 @@ test('jump_in_queue：越界时把路由的原因带给模型，并指回去看�
 		assert.equal(out.ok, false);
 		assert.match(out.text, /queue index out of range/);
 		assert.match(out.text, /队列/, '失败话术要把模型引回队列列表，否则它只会再猜一次');
+	} finally {
+		await s.close();
+	}
+});
+
+/* ── remove_from_queue ───────────────────────────────────────────── */
+
+/**
+ * 去掉一首之后的响应（`/api/player/queue/remove` 的 `data`）。
+ *
+ * 注意 `queueSource` 恒为 `'custom'`：服务端对 `library` 是**无条件提升**的
+ * （内容编辑 = 身份编辑），所以"去掉之后还跟着曲库变"这个状态**不存在**。
+ * 夹具照实写这一点 —— 写个 `'library'` 会让测试守着一个到不了的分支。
+ */
+const afterRemove = (over: Record<string, unknown> = {}) => ({
+	currentTrack: { title: '曲目3', artist: '歌手' },
+	queueSize: 4,
+	queueIndex: 1,
+	queueSource: 'custom',
+	queueLabel: null,
+	...over,
+});
+
+test('remove_from_queue：打 queue/remove，body 是 {trackId}（按 id，不是下标）', async () => {
+	const s = await stub({ code: 0, data: afterRemove({ queueLabel: '安静的歌' }) });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_queue.execute!({ trackId: '曲目3.mp3' }, CTX),
+		);
+		assert.equal(s.hits[0].method, 'POST');
+		assert.equal(s.hits[0].path, '/api/player/queue/remove');
+		// ← 本条测试的存在理由：写成 { index: 2 } 也能"成功"，只是**删掉的是另一首**。
+		//   下标是"某一轮提示词里那一份队列"的位置，而队列会被别处改（点播追加 /
+		//   ensureQueue / 本轮更早的工具调用）→ 删错歌且不报错；按 id 最坏 404，看得见。
+		assert.deepEqual(s.hits[0].body, { trackId: '曲目3.mp3' });
+		assert.equal(out.ok, true);
+		assert.match(out.text, /已从队列里去掉一首（id=曲目3\.mp3）/);
+		assert.match(out.text, /队列现在 4 首/);
+		assert.match(out.text, /当前正放第 2 首：曲目3 — 歌手/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('remove_from_queue：去掉正在放的那首，播放是接着走而不是停 —— 必须说出来', async () => {
+	const s = await stub({
+		code: 0,
+		data: afterRemove({ currentTrack: { title: '曲目4', artist: '歌手' } }),
+	});
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_queue.execute!({ trackId: '曲目3.mp3' }, CTX),
+		);
+		// 这句是给用户看的：音乐**没有断**，只是换了一首（而且是他自己要求的）。
+		// 不说，他会去按播放键；说成"已停止"，他会以为出了故障。
+		assert.match(out.text, /当前正放第 2 首：曲目4 — 歌手/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('remove_from_queue：去掉最后一首 → 队列空了、播放停止，也要说出来', async () => {
+	const s = await stub({
+		code: 0,
+		data: afterRemove({ currentTrack: null, queueSize: 0, queueIndex: -1 }),
+	});
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_queue.execute!({ trackId: '最后一首.mp3' }, CTX),
+		);
+		assert.match(out.text, /队列现在 0 首，队列空了，播放已停止/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('remove_from_queue：改过的（没名字的）一批也要说"不再跟着曲库变"', async () => {
+	const s = await stub({ code: 0, data: afterRemove({ queueLabel: null }) });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_queue.execute!({ trackId: 'x.mp3' }, CTX),
+		);
+		// 这一批是**去掉一首之后被就地提升**的那种：没有任何名字可依托，用户下次发现
+		// "新加的歌不进队列了"时，只有这句话是他唯一的线索。
+		assert.match(out.text, /这一批是固定的一批，不再跟着曲库变）/);
+		assert.doesNotMatch(out.text, /当初是按/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('remove_from_queue：有名字的一批要把名字带上（用户才认得出是哪一批）', async () => {
+	const s = await stub({ code: 0, data: afterRemove({ queueLabel: '安静的歌' }) });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_queue.execute!({ trackId: 'x.mp3' }, CTX),
+		);
+		assert.match(out.text, /这一批是固定的一批，不再跟着曲库变；当初是按「安静的歌」挑的/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('remove_from_queue：404「队列里没有这一首」不算失败 —— 队列一个字节都没动', async () => {
+	const s = await stub({ code: 404, message: '队列里没有这一首：x.mp3' }, 404);
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_queue.execute!({ trackId: 'x.mp3' }, CTX),
+		);
+		// 这与 `cancel_scheduled_task` 把"来晚了一步"报成 `cancelled:false` 是同一个处置：
+		// 不是"操作出错"，是"你看到的列表旧了"。报 `ok:false` 会推着模型去编一个补救动作，
+		// 而这里什么都不用做。判据取 `kind === 'not_found'`（classifyStatus 只看 status），
+		// **不读文案** —— 按文案猜会在 BFF 改一次措辞之后静默失效。
+		assert.equal(out.ok, true);
+		assert.match(out.text, /队列没有改动/);
+		assert.match(out.text, /重新 search_library 确认 id/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('remove_from_queue：服务端真出错（5xx）时仍是失败，并如实带上原因', async () => {
+	const s = await stub({ code: 500, message: '队列写入失败' }, 500);
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_queue.execute!({ trackId: 'x.mp3' }, CTX),
+		);
+		// 与上一条成对：404 被收成成功、5xx 不许被一起收掉 —— 否则"服务端坏了"会变成
+		// 一句「队列里没有这一首」，用户照着换说法重试，永远试不出来。
+		assert.equal(out.ok, false);
+		assert.match(out.text, /队列写入失败/);
 	} finally {
 		await s.close();
 	}
@@ -1071,3 +1209,313 @@ test('cancel_scheduled_task：撤不到要说得出原因（模型据此决定�
 		await s.close();
 	}
 });
+
+/* ── 收藏 / 屏蔽（2026-09-28 加）────────────────────────────────────────
+ *
+ * 这四条工具的错法**全都是静默的**，而且集中在同一处：**清单里带不带 id**。
+ * 屏蔽之后 `search_library` 就搜不到那首歌了，于是 `list_hidden` 是**唯一**
+ * 拿得到它 id 的地方（红线③「解封出口不许减」）。清单里漏了 id，模型看得见
+ * 「你屏蔽过 XXX」却动不了它 —— 用户就永远解不开。所以下面第一条断言永远是
+ * 「话里有 `id=`」。
+ */
+
+test('set_favorite：POST /api/library/favorites，body 是 {trackId, favorite}', async () => {
+	const s = await stub({ code: 0, data: { rows: [{ trackId: 'a.mp3', title: 'A', artist: 'x', missing: false }], changed: true } });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).set_favorite.execute!({ trackId: 'a.mp3', favorite: true }, CTX),
+		);
+		assert.equal(s.hits[0].method, 'POST');
+		assert.equal(s.hits[0].path, '/api/library/favorites');
+		assert.deepEqual(s.hits[0].body, { trackId: 'a.mp3', favorite: true });
+		assert.equal(out.ok, true);
+		assert.match(out.text, /已收藏/);
+		assert.match(out.text, /共收藏 1 首/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('set_favorite：changed=false 时说「本来就是这个状态」，不能报成「已收藏」', async () => {
+	const s = await stub({ code: 0, data: { rows: [], changed: false } });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).set_favorite.execute!({ trackId: 'a.mp3', favorite: false }, CTX),
+		);
+		// ← 本条测试的存在理由：连点两次、或两个入口各点一次都会走到这里。
+		// 说「已取消收藏」是在报告一件没发生的事，用户下一步就会去核对。
+		assert.equal(out.ok, true, '它不是失败');
+		assert.match(out.text, /本来就是这个状态/);
+		assert.match(out.text, /已取消收藏/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('list_favorites：空清单给一句可直说的话（不是空串、也不是「共 0 首」）', async () => {
+	const s = await stub({ code: 0, data: { rows: [] } });
+	try {
+		const out = await run(createTools({ baseUrl: s.baseUrl }).list_favorites.execute!({}, CTX));
+		assert.equal(s.hits[0].method, 'GET');
+		assert.equal(out.ok, true);
+		assert.match(out.text, /还没有收藏/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('list_favorites：每行都要带 id —— 曲名不是标识，模型只能靠 id 去取消收藏', async () => {
+	const s = await stub({
+		code: 0,
+		data: { rows: [{ trackId: '奢香夫人 - 凤凰传奇.mp3', title: '奢香夫人', artist: '凤凰传奇', missing: false }] },
+	});
+	try {
+		const out = await run(createTools({ baseUrl: s.baseUrl }).list_favorites.execute!({}, CTX));
+		assert.match(out.text, /已收藏 1 首/);
+		assert.match(out.text, /奢香夫人/);
+		assert.match(out.text, /id=奢香夫人 - 凤凰传奇\.mp3/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('list_hidden：**这是解除屏蔽的唯一入口**，必须给 id；失效项也要标出来', async () => {
+	const s = await stub({
+		code: 0,
+		data: {
+			rows: [
+				{ trackId: 'b.mp3', title: 'B', artist: 'x', missing: false },
+				{ trackId: 'gone.mp3', title: 'gone.mp3', artist: '', missing: true },
+			],
+		},
+	});
+	try {
+		const out = await run(createTools({ baseUrl: s.baseUrl }).list_hidden.execute!({}, CTX));
+		assert.match(out.text, /id=b\.mp3/, '没有 id 就动不了它');
+		// 失效项标出来：否则模型会照着那个已经不存在的 id 去操作，然后 404。
+		assert.match(out.text, /文件已不在曲库/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('set_hidden：屏蔽时说清**生效时机**（否则用户会说「我不是让你别放这首了吗」）', async () => {
+	const s = await stub({ code: 0, data: { rows: [{ trackId: 'a.mp3', title: 'A', artist: 'x', missing: false }], changed: true } });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).set_hidden.execute!({ trackId: 'a.mp3', hidden: true }, CTX),
+		);
+		assert.deepEqual(s.hits[0].body, { trackId: 'a.mp3', hidden: true });
+		assert.match(out.text, /已屏蔽/);
+		// 队列不动是本分（见 hidden 路由文件头），但不说的话它就是个 bug。
+		assert.match(out.text, /当前队列不受影响/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('search_library：命中的都被屏蔽了 → 要说「另有 N 首被屏蔽」，不能说成「曲库里没有」', async () => {
+	const s = await stub({ code: 0, data: { total: 0, songs: [], hiddenMatches: 2, offset: 0 } });
+	try {
+		const out = await run(createTools({ baseUrl: s.baseUrl }).search_library.execute!({ query: '凤凰' }, CTX));
+		// ← 本条测试的存在理由：这两种处境的句子听起来一样确定，意思完全相反 ——
+		// 「库里没有」与「你自己关掉的」对用户的下一步是两回事。
+		assert.equal(out.ok, true);
+		assert.match(out.text, /没有匹配/);
+		assert.match(out.text, /另有 2 首.*屏蔽/);
+		assert.match(out.text, /list_hidden/);
+	} finally {
+		await s.close();
+	}
+});
+
+/* ── 歌单（2026-09-28 加）────────────────────────────────────────
+ *
+ * 这一族最该钉住的还是同一件事：**清单里带不带 id**。建 / 加 / 删 / 放
+ * 全都要 id，而名字会撞（两份「跑步」完全合法）。
+ * 另一条是「没有整表替换」：加是追加、删是按 id 删一项，所以不存在
+ * 「把这一批写回去」会把其余那些悄悄换掉的路径。
+ */
+
+test('create_playlist：POST /api/playlists，回话里必须带 id（下一步全靠它）', async () => {
+	const s = await stub({ code: 0, data: { playlist: { id: 'pl-1', name: '跑步', count: 0 } } });
+	try {
+		const out = await run(createTools({ baseUrl: s.baseUrl }).create_playlist.execute!({ name: '跑步' }, CTX));
+		assert.deepEqual(s.hits[0].body, { name: '跑步' }, '没给 trackIds 时 body 里不该出现空数组');
+		assert.equal(out.ok, true);
+		assert.match(out.text, /已建歌单「跑步」/);
+		assert.match(out.text, /id=pl-1/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('create_playlist：带 trackIds 就是一次**导入**，并说出导了几首', async () => {
+	const s = await stub({ code: 0, data: { playlist: { id: 'pl-2', name: '睡前', count: 3 } } });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).create_playlist.execute!(
+				{ name: '睡前', trackIds: ['a.mp3', 'b.mp3', 'c.mp3'] },
+				CTX,
+			),
+		);
+		assert.deepEqual((s.hits[0].body as { trackIds: string[] }).trackIds, ['a.mp3', 'b.mp3', 'c.mp3']);
+		assert.match(out.text, /已导入 3 首/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('list_playlists：空库给一句可直说的话；非空要带 id 与首数', async () => {
+	const empty = await stub({ code: 0, data: { playlists: [] } });
+	try {
+		const out = await run(createTools({ baseUrl: empty.baseUrl }).list_playlists.execute!({}, CTX));
+		assert.match(out.text, /还没有建过歌单/);
+	} finally {
+		await empty.close();
+	}
+
+	const s = await stub({ code: 0, data: { playlists: [{ id: 'pl-1', name: '跑步', count: 4 }] } });
+	try {
+		const out = await run(createTools({ baseUrl: s.baseUrl }).list_playlists.execute!({}, CTX));
+		assert.match(out.text, /共 1 份歌单/);
+		assert.match(out.text, /跑步（4 首/);
+		assert.match(out.text, /id=pl-1/, '没有 id 就没法往里加、也没法放');
+	} finally {
+		await s.close();
+	}
+});
+
+test('add_to_playlist：追加；「本来就在里面」要单独说，不能报成已加入', async () => {
+	const s = await stub({ code: 0, data: { playlist: { id: 'pl-1', name: '跑步', count: 3 }, added: 0, skipped: 2 } });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).add_to_playlist.execute!(
+				{ playlistId: 'pl-1', trackIds: ['a.mp3'] },
+				CTX,
+			),
+		);
+		assert.equal(s.hits[0].method, 'POST');
+		assert.equal(s.hits[0].path, '/api/playlists/items');
+		assert.deepEqual(s.hits[0].body, { id: 'pl-1', trackIds: ['a.mp3'] });
+		assert.equal(out.ok, true, '重复添加不是失败');
+		assert.match(out.text, /本来就在/);
+		assert.match(out.text, /现在共 3 首/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('remove_from_playlist：只按 trackId 删（不接受位置），且带在 query 里', async () => {
+	const s = await stub({ code: 0, data: { playlist: { id: 'pl-1', name: '跑步', count: 2 }, removed: true } });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_playlist.execute!(
+				{ playlistId: 'pl-1', trackId: 'a.mp3' },
+				CTX,
+			),
+		);
+		assert.equal(s.hits[0].method, 'DELETE');
+		assert.match(s.hits[0].path, /^\/api\/playlists\/items\?/);
+		assert.match(s.hits[0].path, /trackId=a\.mp3/);
+		assert.match(out.text, /已从「跑步」去掉这一首/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('remove_from_playlist：歌单里本来就没有这首 —— 不是失败，但也不能说成「已删除」', async () => {
+	const s = await stub({ code: 0, data: { playlist: { id: 'pl-1', name: '跑步', count: 2 }, removed: false } });
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).remove_from_playlist.execute!(
+				{ playlistId: 'pl-1', trackId: 'gone.mp3' },
+				CTX,
+			),
+		);
+		assert.equal(out.ok, true);
+		assert.match(out.text, /本来就没有这首/);
+		assert.doesNotMatch(out.text, /已(从|删除)/, '说「已删除」是在报告一件没发生的事');
+	} finally {
+		await s.close();
+	}
+});
+
+test('build_queue 的 playlistId：先读歌单、再把整份交给队列，label 带歌单名', async () => {
+	// 两跳两种回包，所以按 path 分派（与「先搜再组」同形）。
+	const s = await stubRoutes((hit) => {
+		if (hit.path.startsWith('/api/playlists/items')) {
+			return {
+				code: 0,
+				data: {
+					playlist: {
+						name: '跑步',
+						tracks: [
+							{ trackId: 'a.mp3', missing: false },
+							{ trackId: 'gone.mp3', missing: true },
+						],
+					},
+				},
+			};
+		}
+		return { code: 0, data: { state: 'playing', queueSize: 1 } };
+	});
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).build_queue.execute!({ playlistId: 'pl-1' }, CTX),
+		);
+		assert.equal(s.hits[0].path, '/api/playlists/items?id=pl-1');
+		assert.equal(s.hits[1].path, '/api/player/queue');
+		const body = s.hits[1].body as { trackIds: string[]; label: string };
+		assert.deepEqual(body.trackIds, ['a.mp3', 'gone.mp3']);
+		assert.equal(body.label, '歌单「跑步」');
+		assert.match(out.text, /队列已换成歌单「跑步」/);
+		assert.match(out.text, /1 首已经不在曲库里/, '失效的那几首要说出来，否则用户以为都放出来了');
+	} finally {
+		await s.close();
+	}
+});
+
+test('build_queue 的 playlistId：空歌单**不能**退化成恢复整库（那是把一件事换成另一件）', async () => {
+	const s = await stubRoutes(() => ({
+		code: 0,
+		data: { playlist: { name: '空的', tracks: [] } },
+	}));
+	try {
+		const out = await run(
+			createTools({ baseUrl: s.baseUrl }).build_queue.execute!({ playlistId: 'pl-1' }, CTX),
+		);
+		assert.equal(s.hits.length, 1, '不该去打队列接口');
+		assert.equal(out.ok, false);
+		assert.match(out.text, /是空的/);
+		assert.match(out.text, /队列没有改动/);
+	} finally {
+		await s.close();
+	}
+});
+
+test('playlistListText：id 与首数都在话里', () => {
+	const text = playlistListText([
+		{ id: 'pl-1', name: '跑步', count: 4 },
+		{ id: 'pl-2', name: '睡前', count: 0 },
+	]);
+	assert.match(text, /共 2 份歌单/);
+	assert.match(text, /id=pl-1/);
+	assert.match(text, /跑步（4 首/);
+	assert.match(text, /睡前（0 首/, '「哪份是空的」决定了下一步该说放还是先加');
+});
+
+test('flagListText：id 与 missing 都在话里（清单漏 id = 解封入口没了）', () => {
+	const text = flagListText(
+		[
+			{ trackId: 'a.mp3', title: 'A', artist: 'x', missing: false },
+			{ trackId: 'gone.mp3', title: 'gone.mp3', artist: '', missing: true },
+		],
+		'hidden',
+	);
+	assert.match(text, /已屏蔽 2 首/);
+	assert.match(text, /id=a\.mp3/);
+	assert.match(text, /id=gone\.mp3/);
+	assert.match(text, /文件已不在曲库/);
+});
+

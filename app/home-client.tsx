@@ -44,6 +44,7 @@ import { HistoryCard } from '@/components/HistoryCard';
 import { LayoutMenu } from '@/components/LayoutMenu';
 import { LayoutProvider, useLayout } from '@/components/LayoutProvider';
 import { LibraryGrid } from '@/components/LibraryGrid';
+import { PlaylistsPanel } from '@/components/PlaylistsPanel';
 import { LyricsPanel } from '@/components/LyricsPanel';
 import { MemoryCard } from '@/components/MemoryCard';
 import { NowPlaying } from '@/components/NowPlaying';
@@ -51,6 +52,7 @@ import { PaneShell, paneLabel } from '@/components/PaneShell';
 import { PlayerBar } from '@/components/PlayerBar';
 import { PlayerProvider, usePlayerSnapshot } from '@/components/PlayerProvider';
 import { QueueList } from '@/components/QueueList';
+import { queueTitle } from '@/components/queue-view';
 import { ShortcutsPanel } from '@/components/ShortcutsPanel';
 import { ChatIcon, CloseIcon } from '@/components/icons';
 import { SPLIT_HANDLE_PX, SplitHandle } from '@/components/SplitHandle';
@@ -195,8 +197,13 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 						// 不可逆动作的确认按钮（见 `agent/run.ts` 的 `toolApproval`）。
 						// 内联箭头而不是 useCallback：`chat` 每次渲染都是新对象，
 						// 依赖它等于没有缓存 —— 徒增一层读代码时的疑惑。
-						onApproval={(id, approved) => {
-							void chat.addToolApprovalResponse({ id, approved });
+						//
+						// `reason` 只有「算了」那一支会带（`ChatCard` 的 `DENY_REASON`）：
+						// 它随拒答一起回给模型，替掉 SDK 默认那句光秃秃的
+						// `"Tool call execution denied."` —— 少了它模型会去猜
+						// （09-28 实测会重试、并把它说成"故障 / 权限限制"）。
+						onApproval={(id, approved, reason) => {
+							void chat.addToolApprovalResponse({ id, approved, reason });
 						}}
 					/>
 				);
@@ -238,8 +245,9 @@ function MainPanels({ initialMessages }: { initialMessages: UIMessage[] }) {
 		// 队列卡：自定义队列（agent 按条件挑的一批）要把**名字**露出来，
 		// 否则用户看着「6 首」会以为是曲库丢了歌。
 		if (card === 'queue') {
-			const label = snap.queueSource === 'custom' ? snap.queueLabel : null;
-			return label ? `${label} · ${snap.queue.length} 首` : `${snap.queue.length} 首`;
+			// 这一批**是什么**（整个曲库 / 按什么挑的）由 `queue-view.ts` 说 ——
+			// 文案的唯一出处在那里，队列卡底部还会再用同一句话。
+			return queueTitle(snap.queueSource, snap.queueLabel, snap.queue.length);
 		}
 		return undefined;
 	};
@@ -396,6 +404,7 @@ export function Home({ initialMessages }: { initialMessages: UIMessage[] }) {
 							</div>
 							<div className="flex shrink-0 items-center gap-1 sm:gap-1.5">
 								<LibraryGrid />
+								<PlaylistsPanel />
 								<ThemePanel />
 								<ShortcutsPanel />
 								<LayoutMenu />

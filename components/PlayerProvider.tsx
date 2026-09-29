@@ -11,6 +11,7 @@
 'use client';
 import { createContext, useContext, useEffect, useState } from 'react';
 import type { PlayerSnapshot } from '@/contract/player';
+import { migrateFavoritesFromStorage } from './flag-client';
 
 const EMPTY: PlayerSnapshot = {
 	state: 'stopped',
@@ -26,6 +27,10 @@ const EMPTY: PlayerSnapshot = {
 	volume: 0.8,
 	mode: 'seq',
 	shuffle: false,
+	// 空数组 = 「还没有收藏 / 屏蔽」——与「读不到」在界面上是同一块地方，
+	// 而这两件事对用户的意义不同，所以 SSE 一连上（几十毫秒）就会被真值替掉。
+	favoriteIds: [],
+	hiddenIds: [],
 };
 
 const PlayerSnapshotContext = createContext<PlayerSnapshot>(EMPTY);
@@ -84,6 +89,19 @@ export function PlayerProvider({ children }: { children: React.ReactNode }) {
 		};
 
 		connect();
+
+		/**
+		 * 一次性迁移：把旧版本存在 `localStorage` 里的收藏并进服务端。
+		 *
+		 * 放在这里是因为它是**全局的一次**：收藏从这一版起属于服务端（人的偏好，
+		 * 不是设备的事实，判据见 `contract/library-flags.ts`），而老用户攒的那份
+		 * 还在本机。放到任何一个具体组件里，都会变成「打开那个组件才迁移」。
+		 *
+		 * 失败不提示：它会在下次打开时重试（本机的键只在全部成功之后才删）。
+		 * 此时界面照常工作 —— 只是"我以前收藏的"暂时还是旧的那份。
+		 */
+		void migrateFavoritesFromStorage();
+
 		return () => {
 			closed = true;
 			if (retryTimer) clearTimeout(retryTimer);

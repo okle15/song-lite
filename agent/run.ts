@@ -29,6 +29,7 @@ import {
 import type { Preference } from '../contract/preference';
 import type { PlayerSnapshot } from '../contract/player';
 import { costMicro, type Price } from '../contract/pricing';
+import { normalizeTags } from '../contract/track-tags';
 import { buildSystemPrompt } from './prompt';
 import { type AgentConfig, getModel } from './provider';
 import { createTools } from './tools';
@@ -212,6 +213,48 @@ export function toolCallPruningFor(uiMessages: UIMessage[]): 'none' | 'before-la
 }
 
 /**
+ * 改标签要不要先问一句 —— **只有「去掉」要问，「加上」不问**。
+ *
+ * ── 为什么这条闸门只能挂在 `remove` 上，不能按工具名整开关 ──────────────
+ * `set_track_tags` 一个工具里装着两件事：**加标签**（无害，只是多写一个词）与
+ * **去掉标签**（删的是用户自己定的判断）。本项目的确认判据是「**删的是用户的东西**」
+ * （见下面 `toolApproval` 那一大段），它只命中后一半。按工具名整开关会在用户说
+ * 「这首其实是民谣」（纯 add）时也拦一下 —— 那是**纯粹的摩擦**，而摩擦多了会把
+ * 人训练成见框就点，闸门等于失效。本版 SDK 支持给单个工具传函数（返回
+ * `ToolApprovalStatus`），所以这件事能按入参判，不必二选一。
+ *
+ * ⚠️ `remove` 里最重的一档是**清空**：`tools.ts` 的 `execute` 在最终集合为空时走
+ * `DELETE` 把那一行整个删掉，界面上退回「＋ 标签」，与「从来没打过标签」**长得一模一样**
+ * —— 正是判据的第三条「撤掉之后**用户根本不知道曾经有这么一件事**」（同 `forget_preference`）。
+ *
+ * 拆词复用 `contract/track-tags.ts` 的 `normalizeTags`（分隔符 / 去空 / 小写的唯一出处）：
+ * 自己写一遍 `split` 会让「空串算不算说了要删」在两处口径不同，而这里判错的后果是
+ * **该问的不问**。**空 / 全空白 = 没说**（模型偶尔给一个空串），那时 `execute` 本来
+ * 就会判成「没有变化」，拦一下纯属添乱。
+ *
+ * 导出是给单测的（同 `toolCallPruningFor`）：这条规则的输入是承重的，选错档在
+ * `tsc`、单测、服务端日志里**一个都不留痕** —— 少问一次用户不会收到任何报错。
+ *
+ * `reason` 会以 `approval.requestReason` 到前端（`ChatCard` 的确认框把它念出来），
+ * 所以它写成**用户看得懂的一句话**并点名要去掉哪些词 —— 只说「确认吗」等于没说。
+ */
+export function tagEditApproval(input: {
+	add?: string;
+	remove?: string;
+}): 'not-applicable' | { type: 'user-approval'; reason: string } {
+	const words = normalizeTags(input.remove);
+	if (words.length === 0) return 'not-applicable';
+	const also = normalizeTags(input.add);
+	return {
+		type: 'user-approval',
+		reason:
+			`会从这首歌的标签里去掉「${words.join('、')}」` +
+			(also.length ? `（同时加上「${also.join('、')}」）` : '') +
+			'。',
+	};
+}
+
+/**
  * 跑完一整轮对话。返回 `{ result, tools }`——**流还没被消费**，怎么送出去由路由决定。
  *
  * `async` 的唯一原因是 `convertToModelMessages` 返回 Promise（它要 await 工具的
@@ -278,10 +321,19 @@ export async function runAgent(config: AgentConfig, opts: RunAgentOptions) {
 		tools,
 		stopWhen: [isStepCount(MAX_STEPS), budgetStop],
 		// ── 确认闸门：不可逆的动作先问一句 ──
-		// 判据是**「删掉的是用户的东西」**，而不是"危险"这种说不清的词。这两个工具
+		// 判据是**「删掉的是用户的东西」**，而不是"危险"这种说不清的词。前两个工具
 		// 一旦执行就没有回头的路，而模型有可能误解了用户的意思：一句「我明天不想
 		// 听歌了」被它读成「把那个定时任务撤掉」——**撤掉之后用户根本不知道
 		// 曾经有这么一件事**（清单里不再有它，没有任何痕迹）。
+		//
+		// 第三项**按入参判**（本版 SDK 支持给单个工具传函数）：`set_track_tags`
+		// 一手里既有无害的"加"、又有删用户判断的"删"，整开关会连"加"一起拦。
+		// 判据、边界与 `reason` 的写法见 `tagEditApproval`。
+		//
+		// ⚠️ **不加** `build_queue` / `remove_from_queue`：队列是**状态**不是数据
+		// （`server/player/state.ts` 挂在 globalThis 上，重启即回整库），被去掉的曲目
+		// 仍在曲库里、随时能再点播回来；而 `build_queue` 是「来点安静的」最常见的
+		// 走法，给它装闸门等于拦住主流程。判据是「删的是用户的东西」，**队列不是那个东西**。
 		//
 		// ⚠️ 为什么这不算"在业务层糊一层"：它是 `streamText` 的**原生选项**，
 		// 与 `stopWhen` 同一层 —— 循环的形状一行没动，审批由 SDK 插在
@@ -294,6 +346,7 @@ export async function runAgent(config: AgentConfig, opts: RunAgentOptions) {
 		toolApproval: {
 			cancel_scheduled_task: 'user-approval',
 			forget_preference: 'user-approval',
+			set_track_tags: tagEditApproval,
 		},
 		abortSignal: opts.signal,
 		// ⑨ 的首字延迟。**观察钩子，不是循环的一环**：它不改变终止条件、

@@ -24,6 +24,8 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import type { ToolOutcome } from '@/contract/tool';
 import { approvalView } from './approval-view';
+import { VoiceButton } from './VoiceButton';
+import { voiceInsert } from './voice-capture';
 
 /**
  * 工具名的中文标签；未登记的走原始名。
@@ -40,6 +42,7 @@ const TOOL_LABEL: Record<string, string> = {
 	pause_playback: '暂停',
 	resume_playback: '继续播放',
 	jump_in_queue: '队列跳转',
+	remove_from_queue: '去掉一首',
 	set_volume: '调整音量',
 	set_playback_mode: '播放方式',
 	recent_plays: '播放历史',
@@ -51,6 +54,34 @@ const TOOL_LABEL: Record<string, string> = {
 	list_scheduled_tasks: '任务清单',
 	cancel_scheduled_task: '撤销任务',
 };
+
+/**
+ * 用户点「算了」时**回给模型**的那句话。
+ *
+ * 这不是界面文案（界面文案在下面的渲染分支里：「已放弃（你没有批准）」），
+ * 它进的是发给模型的 tool result。**为什么必须给**：
+ * SDK 把拒答转成 `execution-denied`，而 provider 在没有 `reason` 时只发一句
+ * `"Tool call execution denied."`（`@ai-sdk/openai-compatible` 的 tool-result 分支：
+ * `contentValue = output.reason ?? "Tool call execution denied."`）。
+ *
+ * 09-28 端到端实测（探针 F，真模型 + 真浏览器），模型拿到那句光秃秃的英文之后
+ * 做了两件都不该做的事：
+ *
+ *   ① **又问了一遍** —— 同一轮里第二次调 `set_track_tags`，于是界面上在
+ *      「已放弃」后面又冒出一个待确认框。用户明明刚说了"算了"。
+ *   ② 把它**说成了故障** —— 原话是「工具调用失败了，可能是权限限制」，
+ *      于是用户以为系统坏了，而不是"我自己刚拒绝的"。
+ *
+ * 两件都**不是**安全问题（闸门两次都拦住了、标签一个字节没动 —— 这正是探针里
+ * 同时断言「再审一次之后标签依然没动」的原因），但都是**用户看得见的**。
+ * 根因只有一个：拒绝这件事**没有任何说明**就传给了模型。
+ *
+ * 所以这句要说清三件事：谁拒的、为什么没执行（**排除故障与权限**，否则模型会往
+ * 那两个方向猜）、以及别重试。⚠️ 措辞上不要把"重试"写成一种选项。
+ */
+const DENY_REASON =
+	'用户点了「算了」，明确拒绝了这一步，所以它没有执行。这不是故障，也不是权限问题，请不要重试。' +
+	'请如实告诉用户这一步没有执行。';
 
 /** 轨迹卡片要展示的三样东西。 */
 type Trace = { name: string; ok: boolean; ms?: number; text?: string };
@@ -138,8 +169,10 @@ type Props = {
 	 * ⚠️ 但只有**最后一条消息**上的确认框会把按钮接到它：`addToolApprovalResponse`
 	 * 只更新最后一条消息里的 part，更早的那些框即使留着按钮也是死控件
 	 * （选档的规则在 `approval-view.ts`，带单测）。
+	 *
+	 * `reason` 只有「算了」这一支会带 —— 它是**说给模型听的**（`DENY_REASON`）
 	 */
-	onApproval?: (id: string, approved: boolean) => void;
+	onApproval?: (id: string, approved: boolean, reason?: string) => void;
 };
 
 export function ChatCard({ messages, status, error, onSend, onStop, onApproval }: Props) {
@@ -242,7 +275,15 @@ export function ChatCard({ messages, status, error, onSend, onStop, onApproval }
 												</span>
 												<span className="ml-1.5 opacity-80">需要你确认</span>
 											</p>
-											<p className="mt-0.5 text-muted">这一步做完就回不来了，所以要你点一下。</p>
+											<p className="mt-0.5 text-muted">
+												{/* 服务端可以给一句**具体**的理由（`toolApproval` 里那个函数返回的
+												    `reason`，到这儿是 `approval.requestReason`）。有它就念它 ——
+												    闸门装在不同工具上，"回不来了"这种笼统说法并不总成立
+												    （去掉一个标签是能再加回来的），而"要删掉的是哪几个词"
+												    才是用户真正要据以点头的信息。没有就保留原来那句。 */}
+												{part.approval.requestReason ??
+													'这一步做完就回不来了，所以要你点一下。'}
+											</p>
 											<div className="mt-1.5 flex gap-1.5">
 												<button
 													type="button"
@@ -253,7 +294,10 @@ export function ChatCard({ messages, status, error, onSend, onStop, onApproval }
 												</button>
 												<button
 													type="button"
-													onClick={() => onApproval?.(part.approval.id, false)}
+													// 拒答要**带上说明**（见 `DENY_REASON`）：不带的话模型只收到
+													// 一句光秃秃的 `"Tool call execution denied."`，会去猜
+													// （实测既重试过、也把它说成过"故障/权限限制"）。
+													onClick={() => onApproval?.(part.approval.id, false, DENY_REASON)}
 													className="rounded-lg border border-border px-2.5 py-1 text-[11px] text-muted transition hover:bg-surface-2 hover:text-foreground"
 												>
 													算了
@@ -363,6 +407,12 @@ export function ChatCard({ messages, status, error, onSend, onStop, onApproval }
 					aria-label="输入消息"
 					placeholder={busy ? '回复中…' : '说点什么，比如「放一首传奇」'}
 					className="max-h-24 min-h-[2.25rem] min-w-0 flex-1 resize-none rounded-xl border border-border bg-surface-2 px-3 py-1.5 text-sm text-foreground outline-none transition placeholder:text-muted focus:border-brand/50"
+				/>
+				{/* 语音输入：转写结果**接在已有内容后面**、不自动发送（见 VoiceButton 头部的边界）。
+				    不支持的浏览器里这个组件自己返回 null，所以这里不必再判能力。 */}
+				<VoiceButton
+					disabled={busy}
+					onText={(text) => setInput((prev) => voiceInsert(prev, text) ?? prev)}
 				/>
 				{busy ? (
 					<button
